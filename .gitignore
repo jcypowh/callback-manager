@@ -1,0 +1,19 @@
+# Patient data - never goes to GitHub
+data/
+error.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local dev config
+.claude/

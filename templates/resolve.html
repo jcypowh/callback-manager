@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block title %}Resolve task — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Resolve callback</h3>
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <p class="mb-1"><strong>Practice:</strong> {{ task.source_label or '—' }}</p>
+  <p class="mb-1"><strong>Patient:</strong> {{ task.patient_name or '(unparsed)' }}</p>
+  <p class="mb-1">
+    <strong>Number:</strong>
+    {% if task.phone_number %}<a href="tel:{{ task.phone_number }}">{{ task.phone_number }}</a>{% else %}—{% endif %}
+  </p>
+  <p class="mb-0" style="white-space:pre-wrap;"><strong>Message:</strong> {{ task.message_text }}</p>
+</div>
+
+{% if notes %}
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <h6 class="mb-2">Notes so far</h6>
+  {% for n in notes %}
+  <div class="small mb-1">
+    <span class="text-muted">{{ n.created_at[:16].replace('T', ' ') }} — {{ n.author_name or 'system' }}:</span>
+    {{ n.note }}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<form method="post" class="card p-3" style="max-width:600px;">
+  <div class="mb-3">
+    <label class="form-label">Note</label>
+    <textarea name="outcome_note" class="form-control" rows="3"
+              placeholder="What happened / how it was resolved (optional)"></textarea>
+  </div>
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-success"
+            title="Fully sorted - archives this task and pays your full rate if applicable">Completed</button>
+    <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary ms-auto">Back</a>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}Archive — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Archive</h3>
+
+<form method="get" class="mb-3 col-md-4">
+  <input type="text" name="q" class="form-control" placeholder="Search patient, number, practice..." value="{{ q }}">
+</form>
+
+{% if not tasks %}
+<p class="text-muted">Nothing archived yet.</p>
+{% else %}
+<div class="table-responsive">
+<table class="table table-sm bg-white align-middle">
+  <thead>
+    <tr>
+      <th>Resolved</th>
+      <th>Practice</th>
+      <th>Patient</th>
+      <th>Number</th>
+      <th>Outcome</th>
+      <th>Note</th>
+      <th>Result written by</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in tasks %}
+    <tr>
+      <td class="text-nowrap small text-muted">{{ t.actioned_at[:16].replace('T', ' ') if t.actioned_at else '' }}</td>
+      <td>{{ t.source_label or '—' }}</td>
+      <td>{{ t.patient_name or '(unparsed)' }}</td>
+      <td>{{ t.phone_number or '—' }}</td>
+      <td><span class="badge bg-success">{{ outcome_labels.get(t.outcome_type, t.outcome_type) }}</span></td>
+      <td style="max-width:280px; white-space:pre-wrap;">{{ t.outcome_note }}</td>
+      <td>{{ t.actioned_by_name }}</td>
+      <td>
+        {% if t.paid_count %}
+        <span class="text-muted small" title="Already included in a paid payroll run">Paid — locked</span>
+        {% else %}
+        <form method="post" action="{{ url_for('reopen_task', task_id=t.id) }}"
+              onsubmit="return confirm('Reopen this and put it back in the open queue?');">
+          <button class="btn btn-sm btn-outline-warning" title="Misclick? Undo this - sends it back to the open queue">Reopen</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

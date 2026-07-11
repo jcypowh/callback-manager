@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block title %}Log in — Callback Manager{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-4 col-sm-6 mt-5">
+    <h3 class="mb-3 text-center"><i class="fa-solid fa-phone-volume"></i> Callback Manager</h3>
+
+    {% if first_run %}
+    <p class="text-muted text-center">First run — set the shared login password everyone will use.</p>
+    <form method="post" class="card p-4 shadow-sm">
+      <div class="mb-3">
+        <label class="form-label">New password</label>
+        <input type="password" name="password" class="form-control" autofocus required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Confirm password</label>
+        <input type="password" name="password_confirm" class="form-control" required>
+      </div>
+      <button type="submit" class="btn btn-primary w-100">Set password</button>
+    </form>
+    {% else %}
+    <form method="post" class="card p-4 shadow-sm">
+      <div class="mb-3">
+        <label class="form-label">Who are you?</label>
+        <select name="user_id" class="form-select" required>
+          {% for u in users %}
+          <option value="{{ u.id }}">{{ u.display_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Password</label>
+        <input type="password" name="password" class="form-control" autofocus required>
+      </div>
+      <button type="submit" class="btn btn-primary w-100">Log in</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

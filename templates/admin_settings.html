@@ -1,0 +1,85 @@
+{% extends 'base.html' %}
+{% block title %}Settings — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Settings</h3>
+
+<form method="post" class="card p-3 mb-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="save">
+  <div class="mb-3">
+    <label class="form-label">Gmail address</label>
+    <input type="email" name="gmail_address" class="form-control" value="{{ gmail_address }}" placeholder="jcypowh@gmail.com" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Gmail app password</label>
+    <input type="password" name="gmail_app_password" class="form-control" placeholder="{% if has_password %}(unchanged){% else %}not set{% endif %}">
+    <div class="form-text">
+      Generate this at myaccount.google.com &gt; Security &gt; App passwords, for the account
+      above with IMAP enabled. Leave blank to keep the current one.
+    </div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Poll interval (seconds)</label>
+    <input type="number" name="poll_interval_seconds" class="form-control" value="{{ poll_interval_seconds }}" min="30">
+    <div class="form-text">Takes effect after a restart.</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Gmail folder/label to watch</label>
+    <input type="text" name="gmail_folder" class="form-control" value="{{ gmail_folder }}">
+    <div class="form-text">
+      <strong>Recommended:</strong> point this at a dedicated label instead of your whole
+      inbox, so nothing else can ever get picked up by mistake:
+      <ol class="mb-1 mt-1">
+        <li>In Gmail, <strong>Settings &gt; Filters and Blocked Addresses &gt; Create a new filter</strong>,
+          set "From" to <code>automations@solium.ai</code>.</li>
+        <li>Create filter &gt; check <strong>"Apply the label"</strong> &gt; new label, e.g.
+          <code>Callback Manager</code>.</li>
+        <li>In <strong>Settings &gt; Labels</strong>, find that label and tick <strong>"Show in IMAP"</strong>.</li>
+        <li>Enter the exact label name above (e.g. <code>Callback Manager</code>) and save.</li>
+      </ol>
+      Leave as <code>INBOX</code> if you'd rather not set this up yet — it still only ever
+      looks at mail from automations@solium.ai, just across your whole inbox instead of one label.
+    </div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Endoscopy Manager link</label>
+    <input type="url" name="endoscopy_manager_url" class="form-control" value="{{ endoscopy_manager_url }}" placeholder="https://...">
+    <div class="form-text">Shows as a nav link for admins. Leave blank to hide it.</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Practice Manager link</label>
+    <input type="url" name="practice_manager_url" class="form-control" value="{{ practice_manager_url }}" placeholder="https://...">
+    <div class="form-text">Shows as a nav link for admins. Leave blank to hide it.</div>
+  </div>
+  <button class="btn btn-primary">Save settings</button>
+</form>
+
+<form method="post" class="mb-3">
+  <input type="hidden" name="action" value="poll_now">
+  <button class="btn btn-outline-primary">Poll Gmail now</button>
+</form>
+
+<form method="post" class="card p-3 mb-3 d-flex flex-row gap-2 align-items-end" style="max-width:500px;">
+  <input type="hidden" name="action" value="send_test_email">
+  <div class="flex-grow-1">
+    <label class="form-label">Send a test email</label>
+    <input type="email" name="test_email_to" class="form-control" placeholder="you@example.com" required>
+    <div class="form-text">Confirms outgoing email actually works before Warren relies on it.</div>
+  </div>
+  <button class="btn btn-outline-primary">Send test</button>
+</form>
+
+<form method="post" class="card p-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="change_shared_password">
+  <h5>Shared login password</h5>
+  <p class="text-muted small">Everyone (you, Sally, Warren) uses this same password to log in, then picks their own name.</p>
+  <div class="mb-3">
+    <label class="form-label">New password</label>
+    <input type="password" name="new_password" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Confirm new password</label>
+    <input type="password" name="new_password_confirm" class="form-control" required>
+  </div>
+  <button class="btn btn-primary">Change password</button>
+</form>
+{% endblock %}

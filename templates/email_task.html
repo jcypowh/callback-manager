@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% block title %}Email patient — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Email patient</h3>
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <p class="mb-1"><strong>Patient:</strong> {{ task.patient_name or '(unparsed)' }}</p>
+  <p class="mb-0"><strong>Practice:</strong> {{ task.source_label or '—' }}</p>
+</div>
+
+{% if templates %}
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <label class="form-label">Start from a template</label>
+  <select id="template-picker" class="form-select">
+    <option value="">— write from scratch —</option>
+    {% for t in templates %}
+    <option value="{{ t.id }}">{{ t.name }}</option>
+    {% endfor %}
+  </select>
+  <div class="form-text">
+    Fills in the subject and message below — you can still edit before sending.
+    {% if current_user.role == 'admin' %}
+    Manage these under <a href="{{ url_for('email_templates_page') }}">Email Templates</a>.
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<form method="post" class="card p-3" style="max-width:600px;" id="email-form">
+  <div class="mb-3">
+    <label class="form-label">To (patient's email)</label>
+    <input type="email" name="to" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Subject</label>
+    <input type="text" name="subject" id="subject-field" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Message</label>
+    <textarea name="body" id="body-field" class="form-control" rows="6" required>Dear {{ task.patient_name or '' }},
+
+</textarea>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Attach a document (optional)</label>
+    <div class="d-flex gap-2">
+      <select name="attach_hospital" class="form-select">
+        <option value="">— none —</option>
+        {% for h in hospitals %}
+        <option value="{{ h }}">{{ h }}</option>
+        {% endfor %}
+      </select>
+      <select name="attach_doc" class="form-select">
+        {% for key, label in doc_types %}
+        <option value="{{ key }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-text">Only attaches if that hospital has that document uploaded under Documents.</div>
+  </div>
+  <button type="submit" class="btn btn-primary">Send email</button>
+  <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary">Cancel</a>
+</form>
+
+{% if templates %}
+<script>
+var templates = {{ templates | tojson }};
+document.getElementById('template-picker').addEventListener('change', function () {
+  var t = templates.find(function (x) { return String(x.id) === this.value; }, this);
+  if (t) {
+    document.getElementById('subject-field').value = t.subject;
+    document.getElementById('body-field').value = t.body;
+  }
+});
+</script>
+{% endif %}
+{% endblock %}

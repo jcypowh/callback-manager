@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block title %}Users — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Users</h3>
+<p class="text-muted">Everyone shares one login password (set/changed under Settings). This controls
+who shows up in the "who are you" picker, their role, and their pay rates.
+<strong>Rate/task</strong> pays for a Completed or Forward-to-Dr-Tu outcome; <strong>Token rate</strong>
+pays a smaller amount for an "Unable to complete" attempt that goes back to Untouched. Leave either
+blank for no payment (e.g. Sally and Dr Tu aren't paid per task). <strong>Is doctor</strong> controls
+who "Forward to Dr Tu" actually goes to — only one person can be it at a time.</p>
+
+<table class="table table-sm bg-white align-middle mb-4">
+  <thead><tr><th>Name</th><th>Role</th><th>Rate/task</th><th>Token rate</th><th>Is doctor</th><th>Active</th><th></th></tr></thead>
+  <tbody>
+    {% for u in users %}
+    <form id="update-{{ u.id }}" method="post">
+      <input type="hidden" name="action" value="update">
+      <input type="hidden" name="user_id" value="{{ u.id }}">
+    </form>
+    <tr>
+      <td>{{ u.display_name }}</td>
+      <td>
+        <select name="role" form="update-{{ u.id }}" class="form-select form-select-sm">
+          <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
+          <option value="actioneer" {% if u.role == 'actioneer' %}selected{% endif %}>actioneer (full queue)</option>
+          <option value="delegate" {% if u.role == 'delegate' %}selected{% endif %}>delegate (assigned only)</option>
+        </select>
+      </td>
+      <td><input type="number" step="0.01" name="rate_per_task" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.rate_per_task if u.rate_per_task is not none else '' }}" style="width:100px;"></td>
+      <td><input type="number" step="0.01" name="token_rate" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.token_rate if u.token_rate is not none else '' }}" style="width:100px;"></td>
+      <td><input type="checkbox" name="is_doctor" form="update-{{ u.id }}" class="form-check-input" {% if u.is_doctor %}checked{% endif %}></td>
+      <td><input type="checkbox" name="active" form="update-{{ u.id }}" class="form-check-input" {% if u.active %}checked{% endif %}></td>
+      <td class="text-nowrap">
+        <button class="btn btn-sm btn-primary" form="update-{{ u.id }}">Save</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h5>Add a person</h5>
+<form method="post" class="row g-2 align-items-end" style="max-width:700px;">
+  <input type="hidden" name="action" value="create">
+  <div class="col-auto">
+    <label class="form-label">Display name</label>
+    <input type="text" name="display_name" class="form-control" required>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Role</label>
+    <select name="role" class="form-select">
+      <option value="actioneer">actioneer (full queue)</option>
+      <option value="admin">admin</option>
+      <option value="delegate">delegate (assigned only)</option>
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Rate/task ($)</label>
+    <input type="number" step="0.01" name="rate_per_task" class="form-control" style="width:120px;">
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Token rate ($)</label>
+    <input type="number" step="0.01" name="token_rate" class="form-control" style="width:120px;">
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-success">Add</button>
+  </div>
+</form>
+{% endblock %}

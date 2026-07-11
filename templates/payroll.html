@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block title %}Payroll — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Payroll</h3>
+
+<div class="row g-3 mb-4">
+  {% for row in totals %}
+  <div class="col-auto">
+    <div class="card" style="min-width:220px;">
+      <div class="card-body">
+        <h5 class="card-title">{{ row.user.display_name }}</h5>
+        <p class="text-muted small mb-1">
+          {{ row.completed_count }} completed{% if row.attempt_count %}, {{ row.attempt_count }} attempt{{ 's' if row.attempt_count != 1 else '' }}{% endif %} unpaid
+        </p>
+        <p class="fs-4 fw-bold mb-3">${{ '%.2f'|format(row.total) }}</p>
+        {% if row.total > 0 %}
+        <form method="post">
+          <input type="hidden" name="user_id" value="{{ row.user.id }}">
+          <button class="btn btn-success btn-sm">Mark paid</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<h5>Payment history</h5>
+{% if not history %}
+<p class="text-muted">No payments recorded yet.</p>
+{% else %}
+<table class="table table-sm bg-white">
+  <thead><tr><th>Paid</th><th>Person</th><th>Period</th><th>Amount</th></tr></thead>
+  <tbody>
+    {% for h in history %}
+    <tr>
+      <td class="text-nowrap small text-muted">{{ h.paid_at[:16].replace('T', ' ') }}</td>
+      <td>{{ h.display_name }}</td>
+      <td class="small text-muted">{{ h.period_start[:10] }} – {{ h.period_end[:10] }}</td>
+      <td>${{ '%.2f'|format(h.total_amount) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,266 @@
+{% extends 'base.html' %}
+{% block title %}
+  {%- if view == 'questions' %}Questions{% elif view == 'mine' %}My tasks{% else %}Untouched{% endif -%}
+   — Callback Manager
+{% endblock %}
+{% block content %}
+
+<ul class="nav nav-tabs mb-3">
+  {% if not is_delegate %}
+  <li class="nav-item">
+    <a class="nav-link {{ 'active' if view == 'untouched' }}" href="{{ url_for('queue', view='untouched') }}">
+      Untouched <span class="badge bg-secondary">{{ untouched_count }}</span>
+    </a>
+  </li>
+  {% endif %}
+  <li class="nav-item">
+    <a class="nav-link {{ 'active' if view == 'mine' }}" href="{{ url_for('queue', view='mine') }}">
+      My tasks {% if not is_delegate %}<span class="badge bg-info text-dark">{{ mine_count }}</span>{% endif %}
+    </a>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link {{ 'active' if view == 'questions' }}" href="{{ url_for('queue', view='questions') }}">
+      Questions for me {% if questions_count %}<span class="badge bg-warning text-dark">{{ questions_count }}</span>{% endif %}
+    </a>
+  </li>
+</ul>
+
+{% if view == 'questions' %}
+<p class="text-muted small mb-3">
+  Someone asked you a question on their own task — answering doesn't change whose task it is,
+  it just sends your answer back to them so they can carry on.
+</p>
+{% elif view == 'untouched' %}
+<p class="text-muted small mb-3">
+  Nobody's looked at these yet. <strong>Claim</strong> one to work it yourself, or
+  <strong>Handover</strong> it straight to whoever should — it'll disappear from here and land
+  only in their "My tasks".
+</p>
+{% else %}
+<p class="text-muted small mb-3">
+  Four separate things, so they don't get mixed up: <strong class="text-success">Finish</strong> it,
+  <strong class="text-info">ask a question</strong> without giving it up,
+  <strong class="text-primary">hand it over</strong> to someone else's box, or say
+  <strong class="text-danger">you can't do it</strong> — which sends it back (to the pool, or to a
+  specific person) and logs why.
+</p>
+{% endif %}
+
+{% if not tasks %}
+<p class="text-muted">
+  {% if view == 'questions' %}No questions waiting for you right now.
+  {% elif view == 'untouched' %}Nothing untouched right now — nice.
+  {% elif is_delegate %}Nothing assigned to you right now.
+  {% else %}Nothing in your box right now.{% endif %}
+</p>
+{% else %}
+
+{% for t in tasks %}
+<div class="card mb-3">
+  <div class="card-body pb-2">
+    <div class="d-flex justify-content-between flex-wrap gap-2">
+      <div>
+        <div class="small text-muted">
+          {{ t.created_at[:16].replace('T', ' ') }} · {{ t.source_label or 'Unknown practice' }}
+        </div>
+        <h6 class="mb-1">
+          {{ t.patient_name or '(unparsed — see message)' }}
+          {% if t.phone_number %}· <a href="tel:{{ t.phone_number }}">{{ t.phone_number }}</a>{% endif %}
+        </h6>
+      </div>
+      <div class="text-end">
+        {% if view == 'questions' %}
+        <span class="badge bg-warning text-dark">Question from {{ t.claimed_by_name }}</span>
+        {% elif view == 'mine' or is_delegate %}
+        <span class="badge bg-info text-dark">Processing</span>
+        {% if t.pending_question_for %}
+        <div class="mt-1"><span class="badge bg-warning text-dark">⏳ Waiting on an answer</span></div>
+        {% endif %}
+        <div class="small text-muted mt-1">
+          {{ t.claimed_ago }}{% if t.notes %} · {{ t.notes|length }} note{{ 's' if t.notes|length != 1 else '' }}{% endif %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="mt-2" style="white-space:pre-wrap;">{{ t.message_text }}</div>
+
+    {% if t.notes %}
+    <div class="mt-2 pt-2 border-top small">
+      {% if is_delegate or view == 'questions' %}
+        {% for n in t.notes|reverse %}
+        <div class="mb-1"><span class="text-muted">{{ n.created_at[:16].replace('T', ' ') }} {{ n.author_name or '' }}:</span> {{ n.note }}</div>
+        {% endfor %}
+      {% else %}
+        <span class="text-muted fst-italic">Last: {{ t.notes[0].note }}</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card-footer bg-light">
+    {% if view == 'questions' %}
+      <form method="post" action="{{ url_for('answer_question', task_id=t.id) }}" class="d-flex gap-2 align-items-end">
+        <div class="flex-grow-1" style="max-width:400px;">
+          <label class="action-label text-body">Your answer</label>
+          <input type="text" name="answer" class="form-control form-control-sm" placeholder="Type your answer">
+        </div>
+        <button class="btn btn-sm btn-success">Send answer</button>
+      </form>
+
+    {% elif view == 'untouched' %}
+      <div class="d-flex flex-wrap gap-3 align-items-end">
+        <form method="post" action="{{ url_for('claim_task', task_id=t.id) }}">
+          <button class="btn btn-sm btn-primary">Claim for myself</button>
+        </form>
+        {% if handoff_targets %}
+        <form method="post" action="{{ url_for('handoff_task', task_id=t.id) }}" class="action-group action-handover">
+          <label class="action-label">Handover to</label>
+          <div class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm">
+              {% for hu in handoff_targets %}
+              <option value="{{ hu.id }}">{{ hu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="instructions" class="form-control form-control-sm"
+                   placeholder="Instructions (optional)">
+            <button class="btn btn-sm btn-primary">Send</button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+
+    {% else %}
+      <div class="d-flex flex-wrap gap-2">
+
+        <div class="action-group action-finish">
+          <label class="action-label">Finish</label>
+          <div class="d-flex gap-1 flex-wrap">
+            <a href="{{ url_for('resolve_task', task_id=t.id) }}" class="btn btn-sm btn-success"
+               title="Fully done - records an outcome and archives it">Resolve...</a>
+            <a href="{{ url_for('email_task', task_id=t.id) }}" class="btn btn-sm btn-outline-success"
+               title="Write and send an email to the patient">Email</a>
+          </div>
+        </div>
+
+        {% if not t.pending_question_for and handoff_targets %}
+        <form method="post" action="{{ url_for('ask_question', task_id=t.id) }}" class="action-group action-ask">
+          <label class="action-label">Ask a question <span class="fw-normal text-muted">(stays your task)</span></label>
+          <div class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm" style="max-width:110px;">
+              {% for hu in handoff_targets %}
+              <option value="{{ hu.id }}">{{ hu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="question" class="form-control form-control-sm" placeholder="Your question">
+            <button class="btn btn-sm btn-info">Ask</button>
+          </div>
+        </form>
+        {% endif %}
+
+        {% if is_delegate %}
+        <form method="post" action="{{ url_for('forward_to_doctor', task_id=t.id) }}" class="action-group action-handover">
+          <label class="action-label">Handover to Dr Tu</label>
+          <div class="d-flex gap-1">
+            <input type="text" name="reason" class="form-control form-control-sm" placeholder="What he needs to know">
+            <button class="btn btn-sm btn-primary">Send</button>
+          </div>
+        </form>
+        {% else %}
+        {% if handoff_targets %}
+        <form method="post" action="{{ url_for('handoff_task', task_id=t.id) }}" class="action-group action-handover">
+          <label class="action-label">Handover to</label>
+          <div class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm" style="max-width:110px;">
+              {% for hu in handoff_targets %}
+              <option value="{{ hu.id }}">{{ hu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="instructions" class="form-control form-control-sm" placeholder="Instructions (optional)">
+            <button class="btn btn-sm btn-primary">Send</button>
+          </div>
+        </form>
+        {% endif %}
+        {% endif %}
+
+        <form method="post" action="{{ url_for('unable_to_complete', task_id=t.id) }}" class="action-group action-cant">
+          <label class="action-label">I can't do this</label>
+          <div class="d-flex gap-1">
+            {% if handoff_targets %}
+            <select name="target_id" class="form-select form-select-sm" style="max-width:150px;">
+              <option value="">Back to pool</option>
+              {% for hu in handoff_targets %}
+              <option value="{{ hu.id }}">To {{ hu.display_name }}</option>
+              {% endfor %}
+            </select>
+            {% endif %}
+            <input type="text" name="reason" class="form-control form-control-sm"
+                   placeholder="{{ 'Why (required)' if is_delegate else 'Why (optional)' }}">
+            <button class="btn btn-sm btn-danger"
+                    title="{{ 'Requires at least one logged attempt first - pays a token amount for the attempt.' if is_delegate else 'No reason needed between you and Sally, but adding one helps whoever picks it up.' }}">Send back</button>
+          </div>
+        </form>
+
+        <div class="action-group action-utility">
+          <label class="action-label">Other</label>
+          <div class="d-flex flex-wrap gap-1">
+            <form method="post" action="{{ url_for('add_task_note', task_id=t.id) }}" class="d-flex gap-1">
+              <input type="text" name="note" class="form-control form-control-sm" style="width:160px;"
+                     placeholder="Log an attempt...">
+              <button class="btn btn-sm btn-outline-secondary" title="Saves a note - task stays yours and active">Log</button>
+            </form>
+            {% if not is_delegate %}
+            <form method="post" action="{{ url_for('unclaim_task', task_id=t.id) }}">
+              <button class="btn btn-sm btn-outline-secondary"
+                      title="Misclick undo - no reason needed, no payment, goes straight back to Untouched">Release (misclick)</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<style>
+.action-group {
+  border: 1px solid #dee2e6;
+  border-left: 4px solid #adb5bd;
+  border-radius: .25rem;
+  padding: .4rem .6rem;
+  background: #fff;
+}
+.action-group .action-label {
+  display: block;
+  font-size: .68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  color: #6c757d;
+  margin-bottom: .25rem;
+}
+.action-finish   { border-left-color: #198754; }
+.action-ask      { border-left-color: #0dcaf0; }
+.action-handover { border-left-color: #0d6efd; }
+.action-cant     { border-left-color: #dc3545; }
+.action-utility  { border-left-color: #adb5bd; background: #f8f9fa; }
+</style>
+<script>
+// Keep the queue reasonably fresh so nobody's looking at a stale list - but
+// never interrupt someone mid-note.
+setInterval(function () {
+  var active = document.activeElement;
+  var typing = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
+  var hasDraft = Array.from(document.querySelectorAll('input[name="note"], input[name="reason"], input[name="question"], input[name="answer"], input[name="instructions"]'))
+    .some(function (el) { return el.value.trim().length > 0; });
+  if (!typing && !hasDraft) {
+    window.location.reload();
+  }
+}, 20000);
+</script>
+{% endblock %}

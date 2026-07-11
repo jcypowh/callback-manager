@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block title %}Email Templates — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Email Templates</h3>
+<p class="text-muted small mb-3">Ready-made subject/message pairs Warren (and everyone) can pick from
+when emailing a patient, instead of writing from scratch each time.</p>
+
+{% if not templates %}
+<p class="text-muted">No templates yet — add one below.</p>
+{% else %}
+<div class="mb-4" style="max-width:700px;">
+  {% for t in templates %}
+  <div class="card p-2 mb-2">
+    <div class="d-flex justify-content-between align-items-start">
+      <div>
+        <strong>{{ t.name }}</strong>
+        <div class="small text-muted">Subject: {{ t.subject }}</div>
+        <div class="small" style="white-space:pre-wrap;">{{ t.body }}</div>
+      </div>
+      <form method="post" onsubmit="return confirm('Delete this template?');">
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="template_id" value="{{ t.id }}">
+        <button class="btn btn-sm btn-outline-danger">Delete</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h5>Add a template</h5>
+<form method="post" class="card p-3" style="max-width:600px;">
+  <input type="hidden" name="action" value="create">
+  <div class="mb-3">
+    <label class="form-label">Template name</label>
+    <input type="text" name="name" class="form-control" placeholder="e.g. Bowel prep reminder" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Subject</label>
+    <input type="text" name="subject" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Body</label>
+    <textarea name="body" class="form-control" rows="5" required></textarea>
+  </div>
+  <button class="btn btn-success align-self-start">Add template</button>
+</form>
+{% endblock %}

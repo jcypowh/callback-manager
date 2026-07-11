@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block title %}Messages — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Messages</h3>
+<p class="text-muted small mb-3">A shared noticeboard for anything that isn't tied to one specific patient
+task — questions, updates, whatever needs saying. Everyone sees this.</p>
+
+<form method="post" class="card p-3 mb-3" style="max-width:600px;">
+  <textarea name="body" class="form-control mb-2" rows="3" placeholder="Write a message..." required></textarea>
+  <button class="btn btn-primary align-self-start">Post</button>
+</form>
+
+{% if not messages %}
+<p class="text-muted">No messages yet.</p>
+{% else %}
+<div style="max-width:700px;">
+  {% for m in messages %}
+  <div class="card p-2 mb-2">
+    <div class="small text-muted">{{ m.created_at[:16].replace('T', ' ') }} — <strong>{{ m.author_name or 'system' }}</strong></div>
+    <div style="white-space:pre-wrap;">{{ m.body }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
