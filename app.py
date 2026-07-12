@@ -1106,6 +1106,12 @@ def admin_settings():
                     flash(f'Test email failed: {error}', 'danger')
                 else:
                     flash(f'Test email sent to {test_to} — check that it arrived.', 'success')
+        elif action == 'seed_training_data':
+            added = seed_training_patients()
+            if added:
+                flash(f'Added {added} training patient(s) to the Untouched queue.', 'success')
+            else:
+                flash('Training patients are already there — nothing new to add.', 'warning')
         return redirect(url_for('admin_settings'))
 
     return render_template(
@@ -1117,6 +1123,53 @@ def admin_settings():
         endoscopy_manager_url=cfg('endoscopy_manager_url', ''),
         practice_manager_url=cfg('practice_manager_url', ''),
     )
+
+
+# ---------- training data ----------
+
+TRAINING_PATIENTS = [
+    ('TEST Patient - Nausea After Prep', '+61400000401',
+     'Patient took the bowel prep solution last night and is now experiencing nausea, dizziness, '
+     'and stomach cramps. She is worried this is not normal and wants a clinician to call her back today.',
+     'Mater Hospital', '<training-nausea@example.com>'),
+    (None, '+61400000402',
+     'AI phone system booked a Colonoscopy appointment for Thursday 20 August 2026 at Dee Why '
+     'Endoscopy. No patient name or email captured. Please call to confirm the booking details, '
+     "obtain the patient's email address, and send them the clinic confirmation letter.",
+     'Dee Why Endoscopy', '<training-ai-booking@example.com>'),
+    ('TEST Patient - Bowel Prep Request', '+61400000403',
+     'Patient is asking for the bowel prep instructions to be emailed to her ahead of her '
+     'upcoming colonoscopy. She does not have a copy and would like it sent as soon as possible.',
+     'Dee Why Endoscopy', '<training-bowel-prep@example.com>'),
+    ('TEST Patient - Reschedule Request', '+61400000404',
+     'Patient needs to reschedule her colonoscopy next Tuesday - she has a work conflict and is '
+     'asking for the next available date, preferably a Friday.',
+     'Dee Why Endoscopy', '<training-reschedule@example.com>'),
+    ('TEST Patient - Billing Question', '+61400000405',
+     'Patient is asking how much out-of-pocket cost to expect for her upcoming colonoscopy and '
+     'whether Medicare/private health will cover it.',
+     'East Sydney Private Hospital', '<training-billing@example.com>'),
+]
+
+
+def seed_training_patients():
+    """Insert the fixed set of training/demo patients into the Untouched queue.
+    Safe to call repeatedly - duplicates are skipped via the unique message id."""
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+    for patient_name, phone, message, source_label, message_id in TRAINING_PATIENTS:
+        try:
+            db.execute(
+                'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, '
+                'source_label, gmail_message_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (now, patient_name, phone, message, source_label, message_id, 'open'),
+            )
+            added += 1
+        except sqlite3.IntegrityError:
+            continue
+    db.commit()
+    return added
 
 
 # ---------- Gmail polling ----------

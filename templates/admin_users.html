@@ -3,14 +3,16 @@
 {% block content %}
 <h3 class="mb-3">Users</h3>
 <p class="text-muted">Everyone shares one login password (set/changed under Settings). This controls
-who shows up in the "who are you" picker, their role, and their pay rates.
-<strong>Rate/task</strong> pays for a Completed or Forward-to-Dr-Tu outcome; <strong>Token rate</strong>
-pays a smaller amount for an "Unable to complete" attempt that goes back to Untouched. Leave either
-blank for no payment (e.g. Sally and Dr Tu aren't paid per task). <strong>Is doctor</strong> controls
-who "Forward to Dr Tu" actually goes to — only one person can be it at a time.</p>
+who shows up in the "who are you" picker, their role, and their pay rates — editable by you or Sally.
+<strong>Successful completion</strong> pays for a Completed or Forward-to-Dr-Tu outcome —
+i.e. the message actually got sorted out. <strong>Attempted but failed</strong> pays a smaller
+amount for an "I can't do this" hand-back that goes back to Untouched — i.e. real effort, no
+resolution. Leave either blank for no payment (e.g. Sally and Dr Tu aren't paid per task).
+<strong>Is doctor</strong> controls who "Forward to Dr Tu" actually goes to — only one person
+can be it at a time.</p>
 
 <table class="table table-sm bg-white align-middle mb-4">
-  <thead><tr><th>Name</th><th>Role</th><th>Rate/task</th><th>Token rate</th><th>Is doctor</th><th>Active</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>Role</th><th>Successful completion ($)</th><th>Attempted but failed ($)</th><th>Is doctor</th><th>Active</th><th></th></tr></thead>
   <tbody>
     {% for u in users %}
     <form id="update-{{ u.id }}" method="post">
@@ -54,11 +56,11 @@ who "Forward to Dr Tu" actually goes to — only one person can be it at a time.
     </select>
   </div>
   <div class="col-auto">
-    <label class="form-label">Rate/task ($)</label>
+    <label class="form-label">Successful completion ($)</label>
     <input type="number" step="0.01" name="rate_per_task" class="form-control" style="width:120px;">
   </div>
   <div class="col-auto">
-    <label class="form-label">Token rate ($)</label>
+    <label class="form-label">Attempted but failed ($)</label>
     <input type="number" step="0.01" name="token_rate" class="form-control" style="width:120px;">
   </div>
   <div class="col-auto">
