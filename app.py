@@ -11,8 +11,11 @@ from pathlib import Path
 from datetime import datetime, date, timezone
 from functools import wraps
 
+import requests
+from requests.auth import HTTPBasicAuth
 from flask import (
-    Flask, g, render_template, request, redirect, url_for, flash, session, send_file
+    Flask, g, render_template, request, redirect, url_for, flash, session, send_file,
+    send_from_directory
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -36,6 +39,50 @@ DOC_TYPES = [
 
 def _hospital_slug(name):
     return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+
+
+def _to_e164(number):
+    """Convert an Australian number to E.164 (+61...)."""
+    digits = ''.join(filter(str.isdigit, str(number)))
+    if digits.startswith('61'):
+        return '+' + digits
+    if digits.startswith('0'):
+        return '+61' + digits[1:]
+    if len(digits) == 9:
+        return '+61' + digits
+    return '+' + digits
+
+
+def _send_sms(to_number, message):
+    """Send via ClickSend (same API/pattern as review_sender). Returns None on
+    success, or an error message string on failure."""
+    username = cfg('clicksend_username')
+    api_key = cfg('clicksend_api_key')
+    if not username or not api_key:
+        return 'ClickSend is not set up yet — configure it under Settings first.'
+    alpha_tag = cfg('sms_alpha_tag') or 'CallbackMgr'
+
+    payload = {'messages': [{
+        'source': 'sdk',
+        'from': alpha_tag,
+        'body': message,
+        'to': _to_e164(to_number),
+    }]}
+    try:
+        resp = requests.post(
+            'https://rest.clicksend.com/v3/sms/send',
+            json=payload,
+            auth=HTTPBasicAuth(username, api_key),
+            timeout=15,
+        )
+        result = resp.json()
+    except Exception as e:
+        logger.exception('SMS send failed')
+        return str(e)
+
+    if result.get('response_code') != 'SUCCESS':
+        return result.get('response_msg', str(result))
+    return None
 
 
 def _send_email(to_addr, subject, body, attachment_path=None, attachment_name=None):
@@ -92,6 +139,8 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'actioneer',
     rate_per_task REAL,
     token_rate REAL,
+    hourly_rate REAL,
+    phone_number TEXT,
     is_doctor INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1
 );
@@ -145,6 +194,7 @@ CREATE TABLE IF NOT EXISTS payments (
     task_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     amount REAL NOT NULL,
+    minutes REAL,
     reason TEXT NOT NULL,
     created_at TEXT NOT NULL,
     payroll_run_id INTEGER
@@ -196,11 +246,20 @@ def _migrate(db):
         db.execute('ALTER TABLE users ADD COLUMN token_rate REAL')
     if 'is_doctor' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN is_doctor INTEGER NOT NULL DEFAULT 0')
+    if 'hourly_rate' not in existing_user_cols:
+        db.execute('ALTER TABLE users ADD COLUMN hourly_rate REAL')
+    if 'phone_number' not in existing_user_cols:
+        db.execute('ALTER TABLE users ADD COLUMN phone_number TEXT')
+
+    existing_payment_cols = {row['name'] for row in db.execute('PRAGMA table_info(payments)').fetchall()}
+    if 'minutes' not in existing_payment_cols:
+        db.execute('ALTER TABLE payments ADD COLUMN minutes REAL')
 
     # Warren predates the 'delegate' role - promote him if he's still 'actioneer'.
     db.execute("UPDATE users SET role = 'delegate' WHERE display_name = 'Warren' AND role = 'actioneer'")
-    # Give Warren a default token (attempt) rate if one hasn't been set yet.
-    db.execute("UPDATE users SET token_rate = 2.0 WHERE display_name = 'Warren' AND token_rate IS NULL")
+    # Pay moved from per-task rates to an hourly rate - give Warren a default
+    # if he doesn't have one yet (old per-task fields are no longer used).
+    db.execute("UPDATE users SET hourly_rate = 30.0 WHERE display_name = 'Warren' AND hourly_rate IS NULL")
     # Sally and Dr Tu should have the same interface - both full admins.
     db.execute("UPDATE users SET role = 'admin' WHERE display_name = 'Sally' AND role = 'actioneer'")
     # 'Forward to Dr Tu' needs to know which admin is actually the doctor.
@@ -218,14 +277,14 @@ def init_db():
     existing = db.execute('SELECT COUNT(*) AS n FROM users').fetchone()['n']
     if existing == 0:
         seed = [
-            ('Dr Jeffrey Tu', 'admin', None, None, 1),
-            ('Sally', 'admin', None, None, 0),
-            ('Warren', 'delegate', 5.0, 2.0, 0),
+            ('Dr Jeffrey Tu', 'admin', None, 1),
+            ('Sally', 'admin', None, 0),
+            ('Warren', 'delegate', 30.0, 0),
         ]
-        for display_name, role, rate, token_rate, is_doctor in seed:
+        for display_name, role, hourly_rate, is_doctor in seed:
             db.execute(
-                'INSERT INTO users (display_name, role, rate_per_task, token_rate, is_doctor) VALUES (?, ?, ?, ?, ?)',
-                (display_name, role, rate, token_rate, is_doctor),
+                'INSERT INTO users (display_name, role, hourly_rate, is_doctor) VALUES (?, ?, ?, ?)',
+                (display_name, role, hourly_rate, is_doctor),
             )
         db.commit()
     db.close()
@@ -264,13 +323,48 @@ def _can_manage_task(task):
     return task['claimed_by_id'] == session.get('user_id')
 
 
+def _parse_minutes(user, raw):
+    """Returns (minutes_or_None, error_message_or_None). Required if the user
+    is on an hourly rate, optional (and ignored) otherwise."""
+    raw = (raw or '').strip()
+    if not raw:
+        if user['hourly_rate']:
+            return None, "Log how many minutes you spent - that's what you get paid on."
+        return None, None
+    try:
+        return float(raw), None
+    except ValueError:
+        return None, 'Minutes needs to be a number.'
+
+
+def _log_time(db, task_id, user, minutes, now):
+    """Record active minutes spent, paid at the user's hourly rate (locked in
+    at the rate in effect right now, so later rate changes don't rewrite
+    history). No-op if they're not on an hourly rate."""
+    if not minutes or not user['hourly_rate']:
+        return
+    amount = round(minutes / 60.0 * user['hourly_rate'], 2)
+    db.execute(
+        'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (task_id, user['id'], amount, minutes, 'time', now),
+    )
+
+
 @app.before_request
 def require_login():
-    if request.endpoint is None or request.endpoint in ('login', 'static'):
+    if request.endpoint is None or request.endpoint in ('login', 'static', 'service_worker'):
         return None
     if not session.get('user_id'):
         return redirect(url_for('login', next=request.path))
     return None
+
+
+@app.route('/sw.js')
+def service_worker():
+    # Served from the root (not /static/) so its scope covers the whole app,
+    # not just /static/ - a service worker's default scope is its own directory.
+    return send_from_directory(app.static_folder, 'sw.js', mimetype='application/javascript')
 
 
 def admin_required(view):
@@ -512,10 +606,18 @@ def queue():
         "SELECT COUNT(*) AS n FROM tasks WHERE pending_question_for = ?", (session['user_id'],)
     ).fetchone()['n']
 
+    notify_targets = []
+    if not is_delegate:
+        notify_targets = db.execute(
+            "SELECT id, display_name FROM users WHERE active = 1 AND id != ? "
+            "AND phone_number IS NOT NULL AND phone_number != '' ORDER BY display_name",
+            (session['user_id'],),
+        ).fetchall()
+
     return render_template(
         'queue.html', tasks=tasks, sources=sources, handoff_targets=handoff_targets,
         is_delegate=is_delegate, view=view, untouched_count=untouched_count, mine_count=mine_count,
-        questions_count=questions_count,
+        questions_count=questions_count, notify_targets=notify_targets,
     )
 
 
@@ -570,6 +672,44 @@ def handoff_task(task_id):
     return redirect(url_for('queue'))
 
 
+@app.route('/task/<int:task_id>/notify-urgent', methods=['POST'])
+def notify_urgent(task_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can send urgent notifications.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    target_id = request.form.get('target_id', '').strip()
+    note = request.form.get('note', '').strip()
+    target = db.execute('SELECT * FROM users WHERE id = ? AND active = 1', (target_id,)).fetchone()
+    if not task or task['status'] == 'done' or not target:
+        flash('Could not send that notification.', 'warning')
+        return redirect(url_for('queue'))
+    if not target['phone_number']:
+        flash(f'{target["display_name"]} has no phone number saved — add one under Users first.', 'warning')
+        return redirect(url_for('queue'))
+
+    # Deliberately no patient details in the text itself - SMS isn't secure.
+    # It's just a "look now" ping; the real detail lives in the app.
+    message = f"Urgent from {session.get('display_name')}: please check Callback Manager " \
+              "for something that needs action in the next few hours."
+    if note:
+        message += f' ({note})'
+    error = _send_sms(target['phone_number'], message)
+    if error:
+        flash(f'Could not send SMS: {error}', 'danger')
+        return redirect(url_for('queue'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
+        (task_id, session['user_id'], now, f"Sent an urgent SMS to {target['display_name']}."),
+    )
+    db.commit()
+    flash(f"Urgent SMS sent to {target['display_name']}.", 'success')
+    return redirect(url_for('queue'))
+
+
 @app.route('/task/<int:task_id>/unclaim', methods=['POST'])
 def unclaim_task(task_id):
     db = get_db()
@@ -603,12 +743,22 @@ def add_task_note(task_id):
     if not note:
         flash('Enter a note before logging it.', 'warning')
         return redirect(url_for('queue'))
+
+    user = current_user()
+    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
+    if error:
+        flash(error, 'warning')
+        return redirect(url_for('queue'))
+
+    now = datetime.now(timezone.utc).isoformat()
     db.execute(
         'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
-        (task_id, session['user_id'], datetime.now(timezone.utc).isoformat(), note),
+        (task_id, user['id'], now, note),
     )
+    _log_time(db, task_id, user, minutes_val, now)
     db.commit()
-    flash('Attempt logged — task stays claimed and active.', 'success')
+    time_note = f' ({minutes_val:g} min logged)' if minutes_val else ''
+    flash(f'Attempt logged{time_note} — task stays claimed and active.', 'success')
     return redirect(url_for('queue'))
 
 
@@ -691,6 +841,11 @@ def resolve_task(task_id):
     if request.method == 'POST':
         outcome_note = request.form.get('outcome_note', '').strip()
         user = current_user()
+        minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
+        if error:
+            flash(error, 'warning')
+            return render_template('resolve.html', task=task, notes=notes)
+
         now = datetime.now(timezone.utc).isoformat()
         db.execute(
             "UPDATE tasks SET status = 'done', outcome_type = 'completed', outcome_note = ?, "
@@ -698,11 +853,7 @@ def resolve_task(task_id):
             "claimed_by_id = COALESCE(claimed_by_id, ?) WHERE id = ?",
             (outcome_note, user['id'], now, user['id'], task_id),
         )
-        if user['rate_per_task']:
-            db.execute(
-                'INSERT INTO payments (task_id, user_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)',
-                (task_id, user['id'], user['rate_per_task'], 'completed', now),
-            )
+        _log_time(db, task_id, user, minutes_val, now)
         db.commit()
         flash('Task resolved and archived.', 'success')
         return redirect(url_for('queue'))
@@ -730,6 +881,11 @@ def forward_to_doctor(task_id):
         return redirect(url_for('queue'))
 
     user = current_user()
+    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
+    if error:
+        flash(error, 'warning')
+        return redirect(url_for('queue'))
+
     now = datetime.now(timezone.utc).isoformat()
     db.execute(
         "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
@@ -740,11 +896,7 @@ def forward_to_doctor(task_id):
         'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
         (task_id, user['id'], now, f"Forwarded to {doctor['display_name']}: {reason}"),
     )
-    if user['rate_per_task']:
-        db.execute(
-            'INSERT INTO payments (task_id, user_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)',
-            (task_id, user['id'], user['rate_per_task'], 'message_for_doctor', now),
-        )
+    _log_time(db, task_id, user, minutes_val, now)
     db.commit()
     flash(f'Forwarded to {doctor["display_name"]}.', 'success')
     return redirect(url_for('queue'))
@@ -773,7 +925,7 @@ def unable_to_complete(task_id):
 
     # Anti-ping-pong: a delegate must have logged at least one real attempt on
     # this task before they're allowed to hand it back — stops "claim, bounce,
-    # claim, bounce" churning out token payments for zero actual effort.
+    # claim, bounce" churning out paid minutes for zero actual effort.
     if user['role'] == 'delegate':
         logged = db.execute(
             'SELECT COUNT(*) AS n FROM task_notes WHERE task_id = ? AND author_id = ?',
@@ -782,6 +934,11 @@ def unable_to_complete(task_id):
         if not logged:
             flash('Log at least one attempt first (what you tried) before handing this back.', 'warning')
             return redirect(url_for('queue'))
+
+    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
+    if error:
+        flash(error, 'warning')
+        return redirect(url_for('queue'))
 
     now = datetime.now(timezone.utc).isoformat()
     target = None
@@ -809,13 +966,8 @@ def unable_to_complete(task_id):
         'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
         (task_id, user['id'], now, note),
     )
-    paid_note = ''
-    if user['token_rate']:
-        db.execute(
-            'INSERT INTO payments (task_id, user_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)',
-            (task_id, user['id'], user['token_rate'], 'attempt', now),
-        )
-        paid_note = f' (${user["token_rate"]:.2f} token payment recorded)'
+    _log_time(db, task_id, user, minutes_val, now)
+    paid_note = f' ({minutes_val:g} min logged)' if minutes_val else ''
     db.commit()
     dest_label = target['display_name'] if target else 'the Untouched pool'
     flash(f'Handed back to {dest_label}{paid_note}.', 'success')
@@ -964,25 +1116,20 @@ def payroll():
         return redirect(url_for('payroll'))
 
     payees = db.execute(
-        "SELECT * FROM users WHERE (rate_per_task IS NOT NULL OR token_rate IS NOT NULL) AND active = 1"
+        "SELECT * FROM users WHERE hourly_rate IS NOT NULL AND active = 1"
     ).fetchall()
     totals = []
     for u in payees:
-        completed_row = db.execute(
-            "SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n FROM payments "
-            "WHERE user_id = ? AND payroll_run_id IS NULL AND reason != 'attempt'",
-            (u['id'],),
-        ).fetchone()
-        attempt_row = db.execute(
-            "SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n FROM payments "
-            "WHERE user_id = ? AND payroll_run_id IS NULL AND reason = 'attempt'",
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total, COALESCE(SUM(minutes), 0) AS minutes, "
+            "COUNT(*) AS n FROM payments WHERE user_id = ? AND payroll_run_id IS NULL",
             (u['id'],),
         ).fetchone()
         totals.append({
             'user': u,
-            'total': completed_row['total'] + attempt_row['total'],
-            'completed_count': completed_row['n'],
-            'attempt_count': attempt_row['n'],
+            'total': row['total'],
+            'minutes': row['minutes'],
+            'count': row['n'],
         })
     history = db.execute(
         "SELECT r.*, u.display_name FROM payroll_runs r JOIN users u ON u.id = r.user_id "
@@ -1000,33 +1147,31 @@ def admin_users():
         if action == 'create':
             display_name = request.form.get('display_name', '').strip()
             role = request.form.get('role', 'actioneer')
-            rate = request.form.get('rate_per_task', '').strip()
+            rate = request.form.get('hourly_rate', '').strip()
             rate_val = float(rate) if rate else None
-            token = request.form.get('token_rate', '').strip()
-            token_val = float(token) if token else None
+            phone = request.form.get('phone_number', '').strip()
             if not display_name:
                 flash('Display name is required.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO users (display_name, role, rate_per_task, token_rate) VALUES (?, ?, ?, ?)',
-                    (display_name, role, rate_val, token_val),
+                    'INSERT INTO users (display_name, role, hourly_rate, phone_number) VALUES (?, ?, ?, ?)',
+                    (display_name, role, rate_val, phone or None),
                 )
                 db.commit()
                 flash(f'Added {display_name}.', 'success')
         elif action == 'update':
             user_id = request.form.get('user_id')
             role = request.form.get('role', 'actioneer')
-            rate = request.form.get('rate_per_task', '').strip()
+            rate = request.form.get('hourly_rate', '').strip()
             rate_val = float(rate) if rate else None
-            token = request.form.get('token_rate', '').strip()
-            token_val = float(token) if token else None
+            phone = request.form.get('phone_number', '').strip()
             active = 1 if request.form.get('active') == 'on' else 0
             is_doctor = 1 if request.form.get('is_doctor') == 'on' else 0
             if is_doctor:
                 db.execute('UPDATE users SET is_doctor = 0 WHERE id != ?', (user_id,))
             db.execute(
-                'UPDATE users SET role = ?, rate_per_task = ?, token_rate = ?, active = ?, is_doctor = ? WHERE id = ?',
-                (role, rate_val, token_val, active, is_doctor, user_id),
+                'UPDATE users SET role = ?, hourly_rate = ?, phone_number = ?, active = ?, is_doctor = ? WHERE id = ?',
+                (role, rate_val, phone or None, active, is_doctor, user_id),
             )
             db.commit()
             flash('User updated.', 'success')
@@ -1079,6 +1224,11 @@ def admin_settings():
             set_cfg('gmail_folder', request.form.get('gmail_folder', 'INBOX').strip() or 'INBOX')
             set_cfg('endoscopy_manager_url', request.form.get('endoscopy_manager_url', '').strip())
             set_cfg('practice_manager_url', request.form.get('practice_manager_url', '').strip())
+            set_cfg('clicksend_username', request.form.get('clicksend_username', '').strip())
+            new_api_key = request.form.get('clicksend_api_key', '').strip()
+            if new_api_key:
+                set_cfg('clicksend_api_key', new_api_key)
+            set_cfg('sms_alpha_tag', request.form.get('sms_alpha_tag', '').strip() or 'CallbackMgr')
             flash('Settings saved.', 'success')
         elif action == 'poll_now':
             count = poll_gmail()
@@ -1112,6 +1262,19 @@ def admin_settings():
                 flash(f'Added {added} training patient(s) to the Untouched queue.', 'success')
             else:
                 flash('Training patients are already there — nothing new to add.', 'warning')
+        elif action == 'send_test_sms':
+            test_to = request.form.get('test_sms_to', '').strip()
+            if not test_to:
+                flash('Enter a phone number to send the test to.', 'warning')
+            else:
+                error = _send_sms(
+                    test_to,
+                    'Callback Manager test SMS - if you got this, urgent notifications work. Ignore.',
+                )
+                if error:
+                    flash(f'Test SMS failed: {error}', 'danger')
+                else:
+                    flash(f'Test SMS sent to {test_to} — check it arrived.', 'success')
         return redirect(url_for('admin_settings'))
 
     return render_template(
@@ -1122,6 +1285,9 @@ def admin_settings():
         gmail_folder=cfg('gmail_folder', 'INBOX'),
         endoscopy_manager_url=cfg('endoscopy_manager_url', ''),
         practice_manager_url=cfg('practice_manager_url', ''),
+        clicksend_username=cfg('clicksend_username', ''),
+        has_clicksend_key=bool(cfg('clicksend_api_key')),
+        sms_alpha_tag=cfg('sms_alpha_tag', 'CallbackMgr'),
     )
 
 

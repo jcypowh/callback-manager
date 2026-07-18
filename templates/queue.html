@@ -127,6 +127,20 @@
           </div>
         </form>
         {% endif %}
+        {% if notify_targets %}
+        <form method="post" action="{{ url_for('notify_urgent', task_id=t.id) }}" class="action-group action-notify">
+          <label class="action-label">🚨 Notify urgently (SMS)</label>
+          <div class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm">
+              {% for nu in notify_targets %}
+              <option value="{{ nu.id }}">{{ nu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="note" class="form-control form-control-sm" placeholder="Note (optional)">
+            <button class="btn btn-sm btn-warning">Text now</button>
+          </div>
+        </form>
+        {% endif %}
       </div>
 
     {% else %}
@@ -162,6 +176,9 @@
           <label class="action-label">Handover to Dr Tu</label>
           <div class="d-flex gap-1">
             <input type="text" name="reason" class="form-control form-control-sm" placeholder="What he needs to know">
+            {% if current_user.hourly_rate %}
+            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
+            {% endif %}
             <button class="btn btn-sm btn-primary">Send</button>
           </div>
         </form>
@@ -182,6 +199,21 @@
         {% endif %}
         {% endif %}
 
+        {% if notify_targets %}
+        <form method="post" action="{{ url_for('notify_urgent', task_id=t.id) }}" class="action-group action-notify">
+          <label class="action-label">🚨 Notify urgently (SMS)</label>
+          <div class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm" style="max-width:110px;">
+              {% for nu in notify_targets %}
+              <option value="{{ nu.id }}">{{ nu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="note" class="form-control form-control-sm" style="width:130px;" placeholder="Note (optional)">
+            <button class="btn btn-sm btn-warning">Text now</button>
+          </div>
+        </form>
+        {% endif %}
+
         <form method="post" action="{{ url_for('unable_to_complete', task_id=t.id) }}" class="action-group action-cant">
           <label class="action-label">I can't do this</label>
           <div class="d-flex gap-1">
@@ -195,8 +227,11 @@
             {% endif %}
             <input type="text" name="reason" class="form-control form-control-sm"
                    placeholder="{{ 'Why (required)' if is_delegate else 'Why (optional)' }}">
+            {% if current_user.hourly_rate %}
+            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
+            {% endif %}
             <button class="btn btn-sm btn-danger"
-                    title="{{ 'Requires at least one logged attempt first - pays a token amount for the attempt.' if is_delegate else 'No reason needed between you and Sally, but adding one helps whoever picks it up.' }}">Send back</button>
+                    title="{{ 'Requires at least one logged attempt first.' if is_delegate else 'No reason needed between you and Sally, but adding one helps whoever picks it up.' }}">Send back</button>
           </div>
         </form>
 
@@ -206,6 +241,9 @@
             <form method="post" action="{{ url_for('add_task_note', task_id=t.id) }}" class="d-flex gap-1">
               <input type="text" name="note" class="form-control form-control-sm" style="width:160px;"
                      placeholder="Log an attempt...">
+              {% if current_user.hourly_rate %}
+              <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
+              {% endif %}
               <button class="btn btn-sm btn-outline-secondary" title="Saves a note - task stays yours and active">Log</button>
             </form>
             {% if not is_delegate %}
@@ -248,6 +286,7 @@
 .action-ask      { border-left-color: #0dcaf0; }
 .action-handover { border-left-color: #0d6efd; }
 .action-cant     { border-left-color: #dc3545; }
+.action-notify   { border-left-color: #fd7e14; }
 .action-utility  { border-left-color: #adb5bd; background: #f8f9fa; }
 </style>
 <script>
@@ -256,7 +295,7 @@
 setInterval(function () {
   var active = document.activeElement;
   var typing = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
-  var hasDraft = Array.from(document.querySelectorAll('input[name="note"], input[name="reason"], input[name="question"], input[name="answer"], input[name="instructions"]'))
+  var hasDraft = Array.from(document.querySelectorAll('input[name="note"], input[name="reason"], input[name="question"], input[name="answer"], input[name="instructions"], input[name="minutes"]'))
     .some(function (el) { return el.value.trim().length > 0; });
   if (!typing && !hasDraft) {
     window.location.reload();

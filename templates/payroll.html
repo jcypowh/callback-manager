@@ -10,7 +10,8 @@
       <div class="card-body">
         <h5 class="card-title">{{ row.user.display_name }}</h5>
         <p class="text-muted small mb-1">
-          {{ row.completed_count }} completed{% if row.attempt_count %}, {{ row.attempt_count }} attempt{{ 's' if row.attempt_count != 1 else '' }}{% endif %} unpaid
+          {{ row.minutes|round|int }} min logged across {{ row.count }} entr{{ 'y' if row.count == 1 else 'ies' }},
+          unpaid · ${{ '%.2f'|format(row.user.hourly_rate) }}/hr
         </p>
         <p class="fs-4 fw-bold mb-3">${{ '%.2f'|format(row.total) }}</p>
         {% if row.total > 0 %}

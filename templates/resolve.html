@@ -30,9 +30,15 @@
     <textarea name="outcome_note" class="form-control" rows="3"
               placeholder="What happened / how it was resolved (optional)"></textarea>
   </div>
+  {% if current_user.hourly_rate %}
+  <div class="mb-3" style="max-width:160px;">
+    <label class="form-label">Minutes spent (this session)</label>
+    <input type="number" step="1" min="0" name="minutes" class="form-control" placeholder="e.g. 8" required>
+  </div>
+  {% endif %}
   <div class="d-flex gap-2">
     <button type="submit" class="btn btn-success"
-            title="Fully sorted - archives this task and pays your full rate if applicable">Completed</button>
+            title="Fully sorted - archives this task">Completed</button>
     <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary ms-auto">Back</a>
   </div>
 </form>
