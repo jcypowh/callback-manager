@@ -41,21 +41,32 @@
 </textarea>
   </div>
   <div class="mb-3">
-    <label class="form-label">Attach a document (optional)</label>
-    <div class="d-flex gap-2">
-      <select name="attach_hospital" class="form-select">
-        <option value="">— none —</option>
-        {% for h in hospitals %}
-        <option value="{{ h }}">{{ h }}</option>
-        {% endfor %}
-      </select>
-      <select name="attach_doc" class="form-select">
-        {% for key, label in doc_types %}
-        <option value="{{ key }}">{{ label }}</option>
-        {% endfor %}
-      </select>
+    <label class="form-label">Attach documents (optional, tick as many as you need)</label>
+    <div class="table-responsive">
+      <table class="table table-sm table-bordered mb-1 bg-white">
+        <thead>
+          <tr>
+            <th></th>
+            {% for key, label in doc_types %}
+            <th class="small fw-normal">{{ label }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in hospitals %}
+          <tr>
+            <th class="small fw-normal">{{ h }}</th>
+            {% for key, label in doc_types %}
+            <td class="text-center">
+              <input type="checkbox" class="form-check-input" name="attachments" value="{{ h }}|{{ key }}">
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
-    <div class="form-text">Only attaches if that hospital has that document uploaded under Documents.</div>
+    <div class="form-text">Only sends the ones actually uploaded under Documents — you can pick more than one, across hospitals.</div>
   </div>
   <button type="submit" class="btn btn-primary">Send email</button>
   <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary">Cancel</a>

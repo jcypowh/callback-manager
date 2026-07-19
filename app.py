@@ -85,9 +85,10 @@ def _send_sms(to_number, message):
     return None
 
 
-def _send_email(to_addr, subject, body, attachment_path=None, attachment_name=None):
+def _send_email(to_addr, subject, body, attachments=None):
     """Send via the practice's Gmail (SMTP, same app-password used for reading
-    Solium mail). Returns None on success, or an error message string on failure."""
+    Solium mail). attachments is a list of (path, filename) pairs. Returns None
+    on success, or an error message string on failure."""
     gmail_address = cfg('gmail_address')
     gmail_password = cfg('gmail_app_password')
     if not gmail_address or not gmail_password:
@@ -99,7 +100,7 @@ def _send_email(to_addr, subject, body, attachment_path=None, attachment_name=No
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
 
-    if attachment_path and attachment_path.exists():
+    for attachment_path, attachment_name in (attachments or []):
         with open(attachment_path, 'rb') as f:
             part = MIMEBase('application', 'pdf')
             part.set_payload(f.read())
@@ -990,31 +991,49 @@ def email_task(task_id):
         to_addr = request.form.get('to', '').strip()
         subject = request.form.get('subject', '').strip()
         body = request.form.get('body', '').strip()
-        attach_hospital = request.form.get('attach_hospital', '')
-        attach_doc = request.form.get('attach_doc', '')
+        selected = request.form.getlist('attachments')
 
         if not to_addr or not subject or not body:
             flash('Fill in the recipient, subject, and message.', 'danger')
             return render_template('email_task.html', task=task, hospitals=HOSPITALS,
                                     doc_types=DOC_TYPES, templates=templates)
 
-        attachment_name = f'{attach_doc}.pdf' if attach_hospital and attach_doc else None
-        attachment_path = (DOCS_DIR / _hospital_slug(attach_hospital) / attachment_name
-                           if attachment_name else None)
-        error = _send_email(to_addr, subject, body, attachment_path, attachment_name)
+        doc_labels = dict(DOC_TYPES)
+        attachments = []
+        missing = []
+        for item in selected:
+            hospital, _, doc_key = item.partition('|')
+            doc_label = doc_labels.get(doc_key)
+            if not hospital or not doc_label:
+                continue
+            display_name = f'{hospital} - {doc_label}.pdf'
+            path = DOCS_DIR / _hospital_slug(hospital) / f'{doc_key}.pdf'
+            if path.exists():
+                attachments.append((path, display_name))
+            else:
+                missing.append(display_name)
+
+        error = _send_email(to_addr, subject, body, attachments)
         if error:
             flash(f'Could not send email: {error}', 'danger')
             return render_template('email_task.html', task=task, hospitals=HOSPITALS,
                                     doc_types=DOC_TYPES, templates=templates)
 
         user = current_user()
-        note = f'Emailed {to_addr} — "{subject}"' + (f' (attached {attachment_name})' if attachment_name and attachment_path.exists() else '')
+        note = f'Emailed {to_addr} — "{subject}"'
+        if attachments:
+            note += f' (attached {", ".join(name for _, name in attachments)})'
+        if missing:
+            note += f' (not uploaded, skipped: {", ".join(missing)})'
         db.execute(
             'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
             (task_id, user['id'], datetime.now(timezone.utc).isoformat(), note),
         )
         db.commit()
-        flash('Email sent.', 'success')
+        if missing:
+            flash(f'Email sent, but skipped {len(missing)} document(s) not uploaded yet: {", ".join(missing)}', 'warning')
+        else:
+            flash('Email sent.', 'success')
         return redirect(url_for('queue'))
 
     return render_template('email_task.html', task=task, hospitals=HOSPITALS,
