@@ -63,4 +63,45 @@ or forward while you're on the phone with a patient.</p>
   </div>
 </form>
 {% endif %}
+
+<h5 class="mt-4">Other documents</h5>
+<p class="text-muted small mb-2">Not tied to a specific hospital's procedure paperwork — used for the
+welcome email when confirming a consult booking.</p>
+<table class="table table-sm bg-white align-middle" style="max-width:500px;">
+  <tbody>
+    {% for doc in extra %}
+    <tr>
+      <td>{{ doc.label }}</td>
+      <td>
+        {% if doc.exists %}
+        <a href="{{ url_for('view_extra_document', doc_key=doc.key) }}" target="_blank" class="btn btn-sm btn-outline-success">View</a>
+        {% else %}
+        <span class="text-muted small">Not uploaded</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if can_upload %}
+<form method="post" action="{{ url_for('upload_extra_document') }}" enctype="multipart/form-data"
+      class="row g-2 align-items-end" style="max-width:600px;">
+  <div class="col-auto">
+    <label class="form-label">Document</label>
+    <select name="doc_key" class="form-select">
+      {% for doc in extra %}
+      <option value="{{ doc.key }}">{{ doc.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">PDF file</label>
+    <input type="file" name="file" accept="application/pdf" class="form-control" required>
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-success">Upload</button>
+  </div>
+</form>
+{% endif %}
 {% endblock %}

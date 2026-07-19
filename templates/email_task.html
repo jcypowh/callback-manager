@@ -68,6 +68,19 @@
     </div>
     <div class="form-text">Only sends the ones actually uploaded under Documents — you can pick more than one, across hospitals.</div>
   </div>
+  {% if extra_docs %}
+  <div class="mb-3">
+    <label class="form-label">Other documents</label>
+    <div class="d-flex flex-wrap gap-3">
+      {% for key, label in extra_docs %}
+      <div class="form-check">
+        <input type="checkbox" class="form-check-input" id="extra-{{ key }}" name="extra_attachments" value="{{ key }}">
+        <label class="form-check-label" for="extra-{{ key }}">{{ label }}</label>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
   <button type="submit" class="btn btn-primary">Send email</button>
   <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary">Cancel</a>
 </form>

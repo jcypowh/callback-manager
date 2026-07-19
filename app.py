@@ -29,12 +29,18 @@ DB_PATH = DATA_DIR / 'callback_manager.db'
 DOCS_DIR = DATA_DIR / 'documents'
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital', 'Northern Beaches Hospital']
+HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
 DOC_TYPES = [
     ('colonoscopy_prep', 'Colonoscopy Prep'),
     ('gastroscopy_prep', 'Gastroscopy Prep'),
     ('ifc', 'Informed Consent Form (IFC)'),
-    ('clinic_info', 'Clinic Info'),
+]
+
+# Standalone documents that aren't tied to a hospital's procedure paperwork -
+# just the two consult/clinic room info sheets used for the welcome email.
+EXTRA_DOCS = [
+    ('nbh_consult_room_info', 'NBH Consultation Room Info'),
+    ('mater_clinic_room_info', 'Mater Clinic Room Info'),
 ]
 
 
@@ -488,8 +494,12 @@ def documents_page():
                 'exists': (DOCS_DIR / slug / f'{key}.pdf').exists(),
             })
         grid.append({'hospital': hosp, 'slug': slug, 'docs': docs})
+    extra = [
+        {'key': key, 'label': label, 'exists': (DOCS_DIR / f'{key}.pdf').exists()}
+        for key, label in EXTRA_DOCS
+    ]
     return render_template(
-        'documents.html', grid=grid, doc_types=DOC_TYPES,
+        'documents.html', grid=grid, doc_types=DOC_TYPES, extra=extra,
         can_upload=session.get('role') in FULL_ACCESS_ROLES,
     )
 
@@ -513,6 +523,22 @@ def upload_document():
     return redirect(url_for('documents_page'))
 
 
+@app.route('/documents/upload-extra', methods=['POST'])
+def upload_extra_document():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can upload documents.', 'warning')
+        return redirect(url_for('documents_page'))
+    doc_key = request.form.get('doc_key', '')
+    valid_keys = {k for k, _ in EXTRA_DOCS}
+    f = request.files.get('file')
+    if doc_key not in valid_keys or not f or not f.filename:
+        flash('Choose a document type and PDF file.', 'warning')
+        return redirect(url_for('documents_page'))
+    f.save(str(DOCS_DIR / f'{doc_key}.pdf'))
+    flash(f'Uploaded {dict(EXTRA_DOCS).get(doc_key, doc_key)}.', 'success')
+    return redirect(url_for('documents_page'))
+
+
 # ---------- booking checklist (quick reference for new-patient calls) ----------
 
 @app.route('/checklist')
@@ -523,6 +549,15 @@ def checklist_page():
 @app.route('/documents/<hospital_slug>/<doc_key>')
 def view_document(hospital_slug, doc_key):
     path = DOCS_DIR / hospital_slug / f'{doc_key}.pdf'
+    if not path.exists():
+        flash('Not uploaded yet.', 'warning')
+        return redirect(url_for('documents_page'))
+    return send_file(str(path), mimetype='application/pdf')
+
+
+@app.route('/documents/extra/<doc_key>')
+def view_extra_document(doc_key):
+    path = DOCS_DIR / f'{doc_key}.pdf'
     if not path.exists():
         flash('Not uploaded yet.', 'warning')
         return redirect(url_for('documents_page'))
@@ -1000,11 +1035,12 @@ def email_task(task_id):
         subject = request.form.get('subject', '').strip()
         body = request.form.get('body', '').strip()
         selected = request.form.getlist('attachments')
+        selected_extra = request.form.getlist('extra_attachments')
 
         if not to_addr or not subject or not body:
             flash('Fill in the recipient, subject, and message.', 'danger')
             return render_template('email_task.html', task=task, hospitals=HOSPITALS,
-                                    doc_types=DOC_TYPES, templates=templates)
+                                    doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
 
         doc_labels = dict(DOC_TYPES)
         attachments = []
@@ -1021,11 +1057,23 @@ def email_task(task_id):
             else:
                 missing.append(display_name)
 
+        extra_labels = dict(EXTRA_DOCS)
+        for doc_key in selected_extra:
+            doc_label = extra_labels.get(doc_key)
+            if not doc_label:
+                continue
+            display_name = f'{doc_label}.pdf'
+            path = DOCS_DIR / f'{doc_key}.pdf'
+            if path.exists():
+                attachments.append((path, display_name))
+            else:
+                missing.append(display_name)
+
         error = _send_email(to_addr, subject, body, attachments)
         if error:
             flash(f'Could not send email: {error}', 'danger')
             return render_template('email_task.html', task=task, hospitals=HOSPITALS,
-                                    doc_types=DOC_TYPES, templates=templates)
+                                    doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
 
         user = current_user()
         note = f'Emailed {to_addr} — "{subject}"'
@@ -1045,7 +1093,7 @@ def email_task(task_id):
         return redirect(url_for('queue'))
 
     return render_template('email_task.html', task=task, hospitals=HOSPITALS,
-                            doc_types=DOC_TYPES, templates=templates)
+                            doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
 
 
 @app.route('/task/<int:task_id>/reopen', methods=['POST'])
