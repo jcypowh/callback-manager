@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block title %}Checklist — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">New patient / booking checklist</h3>
+
+<div class="card p-3 mb-3" style="max-width:700px;">
+  <h5 class="mb-2">Schedule reference</h5>
+  <p class="mb-1"><strong>Scope (procedure) booking days:</strong></p>
+  <ul class="mb-2">
+    <li>East Sydney Private Hospital — Monday</li>
+    <li>Mater Hospital — Wednesday</li>
+    <li>Dee Why Endoscopy — Friday</li>
+  </ul>
+  <p class="mb-1"><strong>Consult clinic days:</strong></p>
+  <ul class="mb-0">
+    <li>Mater Clinic — Tuesday &amp; Thursday mornings, alternate weeks</li>
+    <li>Northern Beaches Hospital Clinic — Thursday afternoon, alternate weeks</li>
+  </ul>
+</div>
+
+<div class="card p-3 mb-3" style="max-width:700px;">
+  <h5 class="mb-2">A. Patient booked by the AI phone system — needs confirming</h5>
+  <ol class="mb-0">
+    <li>Ring the patient to confirm their appointment.</li>
+    <li>Get their email address.</li>
+    <li>Tell them a confirmation email is on its way.</li>
+    <li>Log into Halaxy and enter the patient's email address there.</li>
+    <li>Send them a welcome email via Callback Manager, with the correct <strong>Clinic Info</strong>
+      document attached — Mater Clinic Info or Northern Beaches Hospital Clinic Info, whichever
+      clinic they're booked into.</li>
+  </ol>
+</div>
+
+<div class="card p-3 mb-3" style="max-width:700px;">
+  <h5 class="mb-2">B. Patient wants to book a scope directly</h5>
+  <ol class="mb-0">
+    <li>Tell them the scope days (see schedule above) and confirm which hospital suits them.</li>
+    <li>Get their Medicare number.</li>
+    <li>Get their private health insurance details — confirm they actually have hospital cover.</li>
+    <li>Email Dr Tu the patient's details.</li>
+  </ol>
+</div>
+
+<div class="card p-3 mb-3" style="max-width:700px;">
+  <h5 class="mb-2">C. Sending scope booking documents</h5>
+  <ul class="mb-2">
+    <li>Colonoscopy only → attach <strong>Colonoscopy Prep</strong>.</li>
+    <li>Colonoscopy + gastroscopy → attach <strong>Colonoscopy Prep</strong> + <strong>Gastroscopy Prep</strong>.</li>
+    <li>Gastroscopy only → attach <strong>Gastroscopy Prep</strong> ONLY — not colonoscopy prep.</li>
+    <li>If they need cost clarified → attach the <strong>IFC</strong>.</li>
+  </ul>
+  <p class="mb-0 text-danger"><strong>Double-check the correct hospital is ticked</strong> before
+    sending — documents are attached per hospital, not shared across them.</p>
+</div>
+
+<div class="card p-3 mb-3" style="max-width:700px;">
+  <h5 class="mb-2">D. Patient asks about cost</h5>
+  <ul class="mb-2">
+    <li>Initial consult: <strong>$320</strong></li>
+    <li>Follow-up consult: <strong>$150</strong></li>
+    <li>Endoscopy: no gap or bulk billed, depending on their insurance status.</li>
+    <li>Policy excess may apply; a hospital fee applies if they don't have insurance.</li>
+  </ul>
+  <p class="mb-0">Forward them the <strong>IFC</strong> and ask them to read it.</p>
+</div>
+{% endblock %}

@@ -29,11 +29,12 @@ DB_PATH = DATA_DIR / 'callback_manager.db'
 DOCS_DIR = DATA_DIR / 'documents'
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
+HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital', 'Northern Beaches Hospital']
 DOC_TYPES = [
     ('colonoscopy_prep', 'Colonoscopy Prep'),
     ('gastroscopy_prep', 'Gastroscopy Prep'),
     ('ifc', 'Informed Consent Form (IFC)'),
+    ('clinic_info', 'Clinic Info'),
 ]
 
 
@@ -488,7 +489,7 @@ def documents_page():
             })
         grid.append({'hospital': hosp, 'slug': slug, 'docs': docs})
     return render_template(
-        'documents.html', grid=grid,
+        'documents.html', grid=grid, doc_types=DOC_TYPES,
         can_upload=session.get('role') in FULL_ACCESS_ROLES,
     )
 
@@ -510,6 +511,13 @@ def upload_document():
     f.save(str(folder / f'{doc_key}.pdf'))
     flash(f'Uploaded {dict(DOC_TYPES).get(doc_key, doc_key)} for {hospital}.', 'success')
     return redirect(url_for('documents_page'))
+
+
+# ---------- booking checklist (quick reference for new-patient calls) ----------
+
+@app.route('/checklist')
+def checklist_page():
+    return render_template('checklist.html')
 
 
 @app.route('/documents/<hospital_slug>/<doc_key>')

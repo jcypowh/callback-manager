@@ -10,9 +10,9 @@ or forward while you're on the phone with a patient.</p>
   <thead>
     <tr>
       <th>Hospital</th>
-      <th>Colonoscopy Prep</th>
-      <th>Gastroscopy Prep</th>
-      <th>IFC</th>
+      {% for key, label in doc_types %}
+      <th>{{ label }}</th>
+      {% endfor %}
     </tr>
   </thead>
   <tbody>
@@ -49,9 +49,9 @@ or forward while you're on the phone with a patient.</p>
   <div class="col-auto">
     <label class="form-label">Document</label>
     <select name="doc_key" class="form-select">
-      <option value="colonoscopy_prep">Colonoscopy Prep</option>
-      <option value="gastroscopy_prep">Gastroscopy Prep</option>
-      <option value="ifc">Informed Consent Form (IFC)</option>
+      {% for key, label in doc_types %}
+      <option value="{{ key }}">{{ label }}</option>
+      {% endfor %}
     </select>
   </div>
   <div class="col-auto">
