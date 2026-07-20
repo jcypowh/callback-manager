@@ -125,9 +125,12 @@ def _send_email(to_addr, subject, body, attachments=None):
     return None
 
 logging.basicConfig(
-    filename=str(BASE_DIR / 'error.log'),
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # so Railway's log viewer actually shows this
+        logging.FileHandler(str(BASE_DIR / 'error.log')),
+    ],
 )
 logger = logging.getLogger('callback_manager')
 
@@ -1306,8 +1309,11 @@ def admin_settings():
             set_cfg('sms_alpha_tag', request.form.get('sms_alpha_tag', '').strip() or 'CallbackMgr')
             flash('Settings saved.', 'success')
         elif action == 'poll_now':
-            count = poll_gmail()
-            flash(f'Poll complete: {count} new task(s) imported.', 'success')
+            count, error = poll_gmail()
+            if error:
+                flash(f'Poll failed: {error}', 'danger')
+            else:
+                flash(f'Poll complete: {count} new task(s) imported.', 'success')
         elif action == 'change_shared_password':
             new_password = request.form.get('new_password', '')
             confirm = request.form.get('new_password_confirm', '')
@@ -1416,7 +1422,7 @@ def seed_training_patients():
 # ---------- Gmail polling ----------
 
 def poll_gmail():
-    """Fetch new Solium emails and insert them as tasks. Returns count imported."""
+    """Fetch new Solium emails and insert them as tasks. Returns (count_imported, error_or_None)."""
     db = sqlite3.connect(str(DB_PATH))
     db.row_factory = sqlite3.Row
     try:
@@ -1433,7 +1439,7 @@ def poll_gmail():
         gmail_password = gmail_password['value'] if gmail_password else None
         gmail_folder = gmail_folder['value'] if gmail_folder else 'INBOX'
         if not gmail_address or not gmail_password:
-            return 0
+            return 0, 'Gmail is not set up yet — configure it under Settings first.'
 
         existing_ids = {
             row['gmail_message_id']
@@ -1445,9 +1451,9 @@ def poll_gmail():
             new_emails = gmail_poller.fetch_new_solium_emails(
                 gmail_address, gmail_password, existing_ids, folder=gmail_folder
             )
-        except Exception:
+        except Exception as e:
             logger.exception('Gmail poll failed')
-            return 0
+            return 0, str(e)
 
         count = 0
         for item in new_emails:
@@ -1469,7 +1475,7 @@ def poll_gmail():
             except sqlite3.IntegrityError:
                 continue
         db.commit()
-        return count
+        return count, None
     finally:
         db.close()
 
