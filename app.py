@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS users (
     rate_per_task REAL,
     token_rate REAL,
     hourly_rate REAL,
+    clinic_hourly_rate REAL,
     phone_number TEXT,
     is_doctor INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1
@@ -202,7 +203,7 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
 
 CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL,
+    task_id INTEGER,
     user_id INTEGER NOT NULL,
     amount REAL NOT NULL,
     minutes REAL,
@@ -259,6 +260,8 @@ def _migrate(db):
         db.execute('ALTER TABLE users ADD COLUMN is_doctor INTEGER NOT NULL DEFAULT 0')
     if 'hourly_rate' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN hourly_rate REAL')
+    if 'clinic_hourly_rate' not in existing_user_cols:
+        db.execute('ALTER TABLE users ADD COLUMN clinic_hourly_rate REAL')
     if 'phone_number' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN phone_number TEXT')
 
@@ -266,11 +269,40 @@ def _migrate(db):
     if 'minutes' not in existing_payment_cols:
         db.execute('ALTER TABLE payments ADD COLUMN minutes REAL')
 
+    # task_id used to be required - relax it so clinic/phone time can be logged
+    # without being tied to a specific callback task. SQLite can't drop a NOT
+    # NULL constraint in place, so rebuild the table.
+    task_id_notnull = next(
+        (row['notnull'] for row in db.execute('PRAGMA table_info(payments)').fetchall()
+         if row['name'] == 'task_id'),
+        0,
+    )
+    if task_id_notnull:
+        db.execute('''
+            CREATE TABLE payments_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                minutes REAL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payroll_run_id INTEGER
+            )
+        ''')
+        db.execute(
+            'INSERT INTO payments_new (id, task_id, user_id, amount, minutes, reason, created_at, payroll_run_id) '
+            'SELECT id, task_id, user_id, amount, minutes, reason, created_at, payroll_run_id FROM payments'
+        )
+        db.execute('DROP TABLE payments')
+        db.execute('ALTER TABLE payments_new RENAME TO payments')
+
     # Warren predates the 'delegate' role - promote him if he's still 'actioneer'.
     db.execute("UPDATE users SET role = 'delegate' WHERE display_name = 'Warren' AND role = 'actioneer'")
     # Pay moved from per-task rates to an hourly rate - give Warren a default
     # if he doesn't have one yet (old per-task fields are no longer used).
     db.execute("UPDATE users SET hourly_rate = 30.0 WHERE display_name = 'Warren' AND hourly_rate IS NULL")
+    db.execute("UPDATE users SET clinic_hourly_rate = 33.0 WHERE display_name = 'Warren' AND clinic_hourly_rate IS NULL")
     # Sally and Dr Tu should have the same interface - both full admins.
     db.execute("UPDATE users SET role = 'admin' WHERE display_name = 'Sally' AND role = 'actioneer'")
     # 'Forward to Dr Tu' needs to know which admin is actually the doctor.
@@ -288,14 +320,15 @@ def init_db():
     existing = db.execute('SELECT COUNT(*) AS n FROM users').fetchone()['n']
     if existing == 0:
         seed = [
-            ('Dr Jeffrey Tu', 'admin', None, 1),
-            ('Sally', 'admin', None, 0),
-            ('Warren', 'delegate', 30.0, 0),
+            ('Dr Jeffrey Tu', 'admin', None, None, 1),
+            ('Sally', 'admin', None, None, 0),
+            ('Warren', 'delegate', 30.0, 33.0, 0),
         ]
-        for display_name, role, hourly_rate, is_doctor in seed:
+        for display_name, role, hourly_rate, clinic_hourly_rate, is_doctor in seed:
             db.execute(
-                'INSERT INTO users (display_name, role, hourly_rate, is_doctor) VALUES (?, ?, ?, ?)',
-                (display_name, role, hourly_rate, is_doctor),
+                'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, is_doctor) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (display_name, role, hourly_rate, clinic_hourly_rate, is_doctor),
             )
         db.commit()
     db.close()
@@ -359,6 +392,19 @@ def _log_time(db, task_id, user, minutes, now):
         'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
         'VALUES (?, ?, ?, ?, ?, ?)',
         (task_id, user['id'], amount, minutes, 'time', now),
+    )
+
+
+def _log_standalone_time(db, user, minutes, rate, reason, now):
+    """Same idea as _log_time but not tied to a specific task - e.g. clinic
+    time. rate is locked in at whatever's passed, same as _log_time."""
+    if not minutes or not rate:
+        return
+    amount = round(minutes / 60.0 * rate, 2)
+    db.execute(
+        'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (None, user['id'], amount, minutes, reason, now),
     )
 
 
@@ -1099,6 +1145,79 @@ def email_task(task_id):
                             doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
 
 
+@app.route('/compose', methods=['GET', 'POST'])
+def compose_email():
+    """A general-purpose "email anyone" page - not tied to a callback task,
+    for anything that doesn't fit the patient-callback workflow."""
+    db = get_db()
+    templates = [dict(t) for t in db.execute('SELECT * FROM email_templates ORDER BY name').fetchall()]
+
+    if request.method == 'POST':
+        to_addr = request.form.get('to', '').strip()
+        subject = request.form.get('subject', '').strip()
+        body = request.form.get('body', '').strip()
+        selected = request.form.getlist('attachments')
+        selected_extra = request.form.getlist('extra_attachments')
+
+        if not to_addr or not subject or not body:
+            flash('Fill in the recipient, subject, and message.', 'danger')
+            return render_template('compose_email.html', hospitals=HOSPITALS,
+                                    doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
+
+        doc_labels = dict(DOC_TYPES)
+        attachments = []
+        missing = []
+        for item in selected:
+            hospital, _, doc_key = item.partition('|')
+            doc_label = doc_labels.get(doc_key)
+            if not hospital or not doc_label:
+                continue
+            display_name = f'{hospital} - {doc_label}.pdf'
+            path = DOCS_DIR / _hospital_slug(hospital) / f'{doc_key}.pdf'
+            if path.exists():
+                attachments.append((path, display_name))
+            else:
+                missing.append(display_name)
+
+        extra_labels = dict(EXTRA_DOCS)
+        for doc_key in selected_extra:
+            doc_label = extra_labels.get(doc_key)
+            if not doc_label:
+                continue
+            display_name = f'{doc_label}.pdf'
+            path = DOCS_DIR / f'{doc_key}.pdf'
+            if path.exists():
+                attachments.append((path, display_name))
+            else:
+                missing.append(display_name)
+
+        error = _send_email(to_addr, subject, body, attachments)
+        if error:
+            flash(f'Could not send email: {error}', 'danger')
+            return render_template('compose_email.html', hospitals=HOSPITALS,
+                                    doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
+
+        user = current_user()
+        note = f'{user["display_name"]} emailed {to_addr} — "{subject}"'
+        if attachments:
+            note += f' (attached {", ".join(name for _, name in attachments)})'
+        if missing:
+            note += f' (not uploaded, skipped: {", ".join(missing)})'
+        db.execute(
+            'INSERT INTO messages (author_id, created_at, body) VALUES (?, ?, ?)',
+            (user['id'], datetime.now(timezone.utc).isoformat(), note),
+        )
+        db.commit()
+        if missing:
+            flash(f'Email sent, but skipped {len(missing)} document(s) not uploaded yet: {", ".join(missing)}', 'warning')
+        else:
+            flash('Email sent.', 'success')
+        return redirect(url_for('compose_email'))
+
+    return render_template('compose_email.html', hospitals=HOSPITALS,
+                            doc_types=DOC_TYPES, extra_docs=EXTRA_DOCS, templates=templates)
+
+
 @app.route('/task/<int:task_id>/reopen', methods=['POST'])
 def reopen_task(task_id):
     db = get_db()
@@ -1157,6 +1276,52 @@ def archive():
     return render_template('archive.html', tasks=tasks, q=q)
 
 
+# ---------- time logging (not tied to a specific task) ----------
+
+@app.route('/log-time', methods=['GET', 'POST'])
+def log_time_page():
+    user = current_user()
+    if not user['hourly_rate'] and not user['clinic_hourly_rate']:
+        flash("You're not set up for hourly pay, so there's nothing to log here.", 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+
+    if request.method == 'POST':
+        kind = request.form.get('kind')
+        raw_minutes = request.form.get('minutes', '').strip()
+        try:
+            minutes = float(raw_minutes)
+        except ValueError:
+            minutes = 0
+        if minutes <= 0:
+            flash('Enter how many minutes you spent.', 'danger')
+            return redirect(url_for('log_time_page'))
+
+        now = datetime.now(timezone.utc).isoformat()
+        if kind == 'phone' and user['hourly_rate']:
+            _log_standalone_time(db, user, minutes, user['hourly_rate'], 'phone_time', now)
+            db.commit()
+            flash(f'Logged {minutes:g} min of telephone task time.', 'success')
+        elif kind == 'clinic' and user['clinic_hourly_rate']:
+            _log_standalone_time(db, user, minutes, user['clinic_hourly_rate'], 'clinic_time', now)
+            db.commit()
+            flash(f'Logged {minutes:g} min of clinic time.', 'success')
+        else:
+            flash('Could not log that.', 'danger')
+        return redirect(url_for('log_time_page'))
+
+    totals = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total, COALESCE(SUM(minutes), 0) AS minutes "
+        "FROM payments WHERE user_id = ? AND payroll_run_id IS NULL",
+        (user['id'],),
+    ).fetchone()
+    recent = db.execute(
+        "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 15",
+        (user['id'],),
+    ).fetchall()
+    return render_template('log_time.html', user=user, totals=totals, recent=recent)
+
+
 # ---------- admin ----------
 # (Needs Dr Tu used to be a separate page; forwarded tasks now just land in the
 # doctor's own "My tasks" box like any other hand-off, so it's gone.)
@@ -1167,34 +1332,80 @@ def archive():
 def payroll():
     db = get_db()
     if request.method == 'POST':
-        user_id = request.form.get('user_id')
-        unpaid = db.execute(
-            'SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL',
-            (user_id,),
-        ).fetchall()
-        if unpaid:
-            total = sum(p['amount'] for p in unpaid)
-            period_start = min(p['created_at'] for p in unpaid)
-            period_end = max(p['created_at'] for p in unpaid)
-            now = datetime.now(timezone.utc).isoformat()
-            cur = db.execute(
-                'INSERT INTO payroll_runs (user_id, period_start, period_end, total_amount, paid_at) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (user_id, period_start, period_end, total, now),
-            )
-            run_id = cur.lastrowid
-            db.execute(
-                "UPDATE payments SET payroll_run_id = ? WHERE id IN ({})".format(
-                    ','.join(str(p['id']) for p in unpaid)
-                ),
-                (run_id,),
+        action = request.form.get('action', 'mark_paid')
+
+        if action == 'mark_paid':
+            user_id = request.form.get('user_id')
+            unpaid = db.execute(
+                'SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL',
+                (user_id,),
+            ).fetchall()
+            if unpaid:
+                total = sum(p['amount'] for p in unpaid)
+                period_start = min(p['created_at'] for p in unpaid)
+                period_end = max(p['created_at'] for p in unpaid)
+                now = datetime.now(timezone.utc).isoformat()
+                cur = db.execute(
+                    'INSERT INTO payroll_runs (user_id, period_start, period_end, total_amount, paid_at) '
+                    'VALUES (?, ?, ?, ?, ?)',
+                    (user_id, period_start, period_end, total, now),
+                )
+                run_id = cur.lastrowid
+                db.execute(
+                    "UPDATE payments SET payroll_run_id = ? WHERE id IN ({})".format(
+                        ','.join(str(p['id']) for p in unpaid)
+                    ),
+                    (run_id,),
+                )
+                db.commit()
+                flash(f'Marked ${total:.2f} as paid.', 'success')
+
+        elif action == 'adjust_payment':
+            payment_id = request.form.get('payment_id')
+            new_amount = request.form.get('amount', '').strip()
+            try:
+                new_amount = round(float(new_amount), 2)
+            except ValueError:
+                flash('Amount needs to be a number.', 'danger')
+                return redirect(url_for('payroll'))
+            payment = db.execute(
+                'SELECT * FROM payments WHERE id = ? AND payroll_run_id IS NULL', (payment_id,)
+            ).fetchone()
+            if not payment:
+                flash('Could not find that entry - it may already be paid.', 'warning')
+            else:
+                db.execute('UPDATE payments SET amount = ? WHERE id = ?', (new_amount, payment_id))
+                db.commit()
+                flash(f'Adjusted entry to ${new_amount:.2f}.', 'success')
+
+        elif action == 'delete_payment':
+            payment_id = request.form.get('payment_id')
+            deleted = db.execute(
+                'DELETE FROM payments WHERE id = ? AND payroll_run_id IS NULL', (payment_id,)
             )
             db.commit()
-            flash(f'Marked ${total:.2f} as paid.', 'success')
+            if deleted.rowcount:
+                flash('Entry removed.', 'success')
+            else:
+                flash('Could not find that entry - it may already be paid.', 'warning')
+
+        elif action == 'update_rates':
+            user_id = request.form.get('user_id')
+            hourly_rate = request.form.get('hourly_rate', '').strip()
+            clinic_hourly_rate = request.form.get('clinic_hourly_rate', '').strip()
+            hourly_rate_val = float(hourly_rate) if hourly_rate else None
+            clinic_hourly_rate_val = float(clinic_hourly_rate) if clinic_hourly_rate else None
+            db.execute(
+                'UPDATE users SET hourly_rate = ?, clinic_hourly_rate = ? WHERE id = ?',
+                (hourly_rate_val, clinic_hourly_rate_val, user_id),
+            )
+            db.commit()
+            flash('Rates updated.', 'success')
+
         return redirect(url_for('payroll'))
 
     payees = db.execute(
-        "SELECT * FROM users WHERE hourly_rate IS NOT NULL AND active = 1"
+        "SELECT * FROM users WHERE (hourly_rate IS NOT NULL OR clinic_hourly_rate IS NOT NULL) AND active = 1"
     ).fetchall()
     totals = []
     for u in payees:
@@ -1203,11 +1414,16 @@ def payroll():
             "COUNT(*) AS n FROM payments WHERE user_id = ? AND payroll_run_id IS NULL",
             (u['id'],),
         ).fetchone()
+        entries = db.execute(
+            "SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL ORDER BY created_at DESC",
+            (u['id'],),
+        ).fetchall()
         totals.append({
             'user': u,
             'total': row['total'],
             'minutes': row['minutes'],
             'count': row['n'],
+            'entries': entries,
         })
     history = db.execute(
         "SELECT r.*, u.display_name FROM payroll_runs r JOIN users u ON u.id = r.user_id "
@@ -1227,13 +1443,16 @@ def admin_users():
             role = request.form.get('role', 'actioneer')
             rate = request.form.get('hourly_rate', '').strip()
             rate_val = float(rate) if rate else None
+            clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
+            clinic_rate_val = float(clinic_rate) if clinic_rate else None
             phone = request.form.get('phone_number', '').strip()
             if not display_name:
                 flash('Display name is required.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO users (display_name, role, hourly_rate, phone_number) VALUES (?, ?, ?, ?)',
-                    (display_name, role, rate_val, phone or None),
+                    'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, phone_number) '
+                    'VALUES (?, ?, ?, ?, ?)',
+                    (display_name, role, rate_val, clinic_rate_val, phone or None),
                 )
                 db.commit()
                 flash(f'Added {display_name}.', 'success')
@@ -1242,14 +1461,17 @@ def admin_users():
             role = request.form.get('role', 'actioneer')
             rate = request.form.get('hourly_rate', '').strip()
             rate_val = float(rate) if rate else None
+            clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
+            clinic_rate_val = float(clinic_rate) if clinic_rate else None
             phone = request.form.get('phone_number', '').strip()
             active = 1 if request.form.get('active') == 'on' else 0
             is_doctor = 1 if request.form.get('is_doctor') == 'on' else 0
             if is_doctor:
                 db.execute('UPDATE users SET is_doctor = 0 WHERE id != ?', (user_id,))
             db.execute(
-                'UPDATE users SET role = ?, hourly_rate = ?, phone_number = ?, active = ?, is_doctor = ? WHERE id = ?',
-                (role, rate_val, phone or None, active, is_doctor, user_id),
+                'UPDATE users SET role = ?, hourly_rate = ?, clinic_hourly_rate = ?, phone_number = ?, '
+                'active = ?, is_doctor = ? WHERE id = ?',
+                (role, rate_val, clinic_rate_val, phone or None, active, is_doctor, user_id),
             )
             db.commit()
             flash('User updated.', 'success')

@@ -25,6 +25,10 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('messages_page') }}">Messages</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('documents_page') }}">Documents</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('checklist_page') }}">Checklist</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('compose_email') }}">Compose Email</a></li>
+        {% if current_user.hourly_rate or current_user.clinic_hourly_rate %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('log_time_page') }}">Log Time</a></li>
+        {% endif %}
         {% if current_user.role == 'admin' %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('payroll') }}">Payroll</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Users</a></li>

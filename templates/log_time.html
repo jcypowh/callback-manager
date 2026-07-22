@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% block title %}Log Time — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Log time</h3>
+
+<div class="card p-3 mb-3" style="max-width:500px;">
+  <p class="mb-0 text-muted small">
+    {{ totals.minutes|round|int }} min logged, unpaid — ${{ '%.2f'|format(totals.total) }}
+    so far this period.
+  </p>
+</div>
+
+<div class="d-flex flex-wrap gap-3 mb-4">
+  {% if user.hourly_rate %}
+  <form method="post" class="card p-3" style="max-width:280px;">
+    <input type="hidden" name="kind" value="phone">
+    <h5 class="mb-1">Telephone task time</h5>
+    <p class="text-muted small mb-2">${{ '%.2f'|format(user.hourly_rate) }}/hr</p>
+    <label class="form-label">Minutes</label>
+    <input type="number" step="0.01" min="0" name="minutes" class="form-control mb-2" placeholder="e.g. 13" required>
+    <button class="btn btn-primary">Log</button>
+  </form>
+  {% endif %}
+
+  {% if user.clinic_hourly_rate %}
+  <form method="post" class="card p-3" style="max-width:280px;">
+    <input type="hidden" name="kind" value="clinic">
+    <h5 class="mb-1">Clinic time</h5>
+    <p class="text-muted small mb-2">${{ '%.2f'|format(user.clinic_hourly_rate) }}/hr</p>
+    <label class="form-label">Minutes</label>
+    <input type="number" step="0.01" min="0" name="minutes" class="form-control mb-2" placeholder="e.g. 276 for 4h 36m" required>
+    <button class="btn btn-primary">Log</button>
+  </form>
+  {% endif %}
+</div>
+
+<h5>Recent entries</h5>
+{% if not recent %}
+<p class="text-muted">Nothing logged yet.</p>
+{% else %}
+<table class="table table-sm bg-white" style="max-width:600px;">
+  <thead><tr><th>When</th><th>What</th><th>Minutes</th><th>Amount</th><th>Paid</th></tr></thead>
+  <tbody>
+    {% for p in recent %}
+    <tr>
+      <td class="text-nowrap small text-muted">{{ p.created_at[:16].replace('T', ' ') }}</td>
+      <td>
+        {% if p.reason == 'clinic_time' %}Clinic time
+        {% elif p.reason == 'phone_time' %}Telephone task time
+        {% elif p.task_id %}Task work
+        {% else %}{{ p.reason }}{% endif %}
+      </td>
+      <td>{{ p.minutes|round|int if p.minutes else '—' }}</td>
+      <td>${{ '%.2f'|format(p.amount) }}</td>
+      <td>{{ 'Yes' if p.payroll_run_id else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

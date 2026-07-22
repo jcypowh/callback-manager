@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block title %}Compose Email — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Compose email</h3>
+<p class="text-muted small mb-3">Send an email to anyone — not tied to a callback task. Gets logged to
+<a href="{{ url_for('messages_page') }}">Messages</a> so there's a record of it.</p>
+
+{% if templates %}
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <label class="form-label">Start from a template</label>
+  <select id="template-picker" class="form-select">
+    <option value="">— write from scratch —</option>
+    {% for t in templates %}
+    <option value="{{ t.id }}">{{ t.name }}</option>
+    {% endfor %}
+  </select>
+  <div class="form-text">
+    Fills in the subject and message below — you can still edit before sending.
+    {% if current_user.role == 'admin' %}
+    Manage these under <a href="{{ url_for('email_templates_page') }}">Email Templates</a>.
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<form method="post" class="card p-3" style="max-width:600px;" id="email-form">
+  <div class="mb-3">
+    <label class="form-label">To</label>
+    <input type="email" name="to" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Subject</label>
+    <input type="text" name="subject" id="subject-field" class="form-control" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Message</label>
+    <textarea name="body" id="body-field" class="form-control" rows="6" required></textarea>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Attach documents (optional, tick as many as you need)</label>
+    <div class="table-responsive">
+      <table class="table table-sm table-bordered mb-1 bg-white">
+        <thead>
+          <tr>
+            <th></th>
+            {% for key, label in doc_types %}
+            <th class="small fw-normal">{{ label }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in hospitals %}
+          <tr>
+            <th class="small fw-normal">{{ h }}</th>
+            {% for key, label in doc_types %}
+            <td class="text-center">
+              <input type="checkbox" class="form-check-input" name="attachments" value="{{ h }}|{{ key }}">
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="form-text">Only sends the ones actually uploaded under Documents — you can pick more than one, across hospitals.</div>
+  </div>
+  {% if extra_docs %}
+  <div class="mb-3">
+    <label class="form-label">Other documents</label>
+    <div class="d-flex flex-wrap gap-3">
+      {% for key, label in extra_docs %}
+      <div class="form-check">
+        <input type="checkbox" class="form-check-input" id="extra-{{ key }}" name="extra_attachments" value="{{ key }}">
+        <label class="form-check-label" for="extra-{{ key }}">{{ label }}</label>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  <button type="submit" class="btn btn-primary">Send email</button>
+  <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary">Cancel</a>
+</form>
+
+{% if templates %}
+<script>
+var templates = {{ templates | tojson }};
+document.getElementById('template-picker').addEventListener('change', function () {
+  var t = templates.find(function (x) { return String(x.id) === this.value; }, this);
+  if (t) {
+    document.getElementById('subject-field').value = t.subject;
+    document.getElementById('body-field').value = t.body;
+  }
+});
+</script>
+{% endif %}
+{% endblock %}
