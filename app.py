@@ -167,6 +167,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     message_text TEXT,
     source_label TEXT,
     attachment_filename TEXT,
+    intake_source TEXT,
+    intake_kind TEXT,
     gmail_message_id TEXT UNIQUE,
     status TEXT NOT NULL DEFAULT 'open',
     claimed_by_id INTEGER,
@@ -252,7 +254,8 @@ def _migrate(db):
     """Add columns introduced after tasks/users already existed in the wild."""
     existing_task_cols = {row['name'] for row in db.execute('PRAGMA table_info(tasks)').fetchall()}
     for col, decl in [('doctor_handled_at', 'TEXT'), ('doctor_handled_by_id', 'INTEGER'),
-                       ('pending_question_for', 'INTEGER'), ('attachment_filename', 'TEXT')]:
+                       ('pending_question_for', 'INTEGER'), ('attachment_filename', 'TEXT'),
+                       ('intake_source', 'TEXT'), ('intake_kind', 'TEXT')]:
         if col not in existing_task_cols:
             db.execute(f'ALTER TABLE tasks ADD COLUMN {col} {decl}')
 
@@ -598,6 +601,55 @@ def checklist_page():
     return render_template('checklist.html')
 
 
+# ---------- stats (counts by how a task came in) ----------
+
+INTAKE_LABELS = {
+    ('solium', 'callback_request'): 'Solium — callback requests',
+    ('solium', 'appointment_new'): 'Solium — new appointments',
+    ('solium', 'appointment_followup'): 'Solium — follow-up appointments',
+    ('halaxy', 'appointment_new'): 'Halaxy — new appointments',
+    ('halaxy', 'appointment_followup'): 'Halaxy — follow-up appointments',
+}
+
+
+@app.route('/stats')
+@admin_required
+def stats_page():
+    db = get_db()
+
+    def _counts(since=None):
+        query = "SELECT intake_source, intake_kind, COUNT(*) AS n FROM tasks"
+        params = []
+        if since:
+            query += " WHERE created_at >= ?"
+            params.append(since)
+        query += " GROUP BY intake_source, intake_kind"
+        rows = db.execute(query, params).fetchall()
+        breakdown = []
+        other = 0
+        for r in rows:
+            key = (r['intake_source'], r['intake_kind'])
+            if key in INTAKE_LABELS:
+                breakdown.append({'label': INTAKE_LABELS[key], 'count': r['n']})
+            else:
+                other += r['n']
+        breakdown.sort(key=lambda x: -x['count'])
+        if other:
+            breakdown.append({'label': 'Manual / referral drop / other', 'count': other})
+        total = sum(b['count'] for b in breakdown)
+        return breakdown, total
+
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_breakdown, month_total = _counts(since=month_start)
+    all_breakdown, all_total = _counts()
+
+    return render_template(
+        'stats.html',
+        month_breakdown=month_breakdown, month_total=month_total,
+        all_breakdown=all_breakdown, all_total=all_total,
+    )
+
+
 @app.route('/documents/<hospital_slug>/<doc_key>')
 def view_document(hospital_slug, doc_key):
     path = DOCS_DIR / hospital_slug / f'{doc_key}.pdf'
@@ -804,6 +856,47 @@ def notify_urgent(task_id):
     db.commit()
     flash(f"Urgent SMS sent to {target['display_name']}.", 'success')
     return redirect(url_for('queue'))
+
+
+@app.route('/task/<int:task_id>/confirm-appointment', methods=['GET', 'POST'])
+def confirm_appointment(task_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can send appointment confirmations.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or task['intake_source'] != 'solium' or task['intake_kind'] != 'appointment_new':
+        flash('That option is only for new Solium AI-booked appointments.', 'warning')
+        return redirect(url_for('queue'))
+    if not task['phone_number']:
+        flash('No phone number on this task to text.', 'warning')
+        return redirect(url_for('queue'))
+
+    link = cfg('patient_confirmation_link', '')
+    default_message = f"Hi {task['patient_name'] or 'there'}, this confirms your new appointment with Shore Gastroenterology."
+    if link:
+        default_message += f' Please complete your details here: {link}'
+    default_message += ' Call us if you need to reschedule.'
+
+    if request.method == 'POST':
+        message = request.form.get('message', '').strip()
+        if not message:
+            flash('Message cannot be empty.', 'danger')
+            return render_template('confirm_appointment.html', task=task, default_message=message)
+        error = _send_sms(task['phone_number'], message)
+        if error:
+            flash(f'Could not send SMS: {error}', 'danger')
+            return render_template('confirm_appointment.html', task=task, default_message=message)
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
+            (task_id, session['user_id'], now, f'Sent appointment-confirmation SMS to patient: "{message}"'),
+        )
+        db.commit()
+        flash('Confirmation SMS sent to patient.', 'success')
+        return redirect(url_for('queue'))
+
+    return render_template('confirm_appointment.html', task=task, default_message=default_message)
 
 
 @app.route('/task/<int:task_id>/unclaim', methods=['POST'])
@@ -1532,6 +1625,7 @@ def admin_settings():
             if new_api_key:
                 set_cfg('clicksend_api_key', new_api_key)
             set_cfg('sms_alpha_tag', request.form.get('sms_alpha_tag', '').strip() or 'CallbackMgr')
+            set_cfg('patient_confirmation_link', request.form.get('patient_confirmation_link', '').strip())
             flash('Settings saved.', 'success')
         elif action == 'poll_now':
             count, error = poll_gmail()
@@ -1594,6 +1688,7 @@ def admin_settings():
         clicksend_username=cfg('clicksend_username', ''),
         has_clicksend_key=bool(cfg('clicksend_api_key')),
         sms_alpha_tag=cfg('sms_alpha_tag', 'CallbackMgr'),
+        patient_confirmation_link=cfg('patient_confirmation_link', ''),
     )
 
 
@@ -1710,7 +1805,7 @@ def view_referral_attachment(task_id):
 # ---------- Gmail polling ----------
 
 def poll_gmail():
-    """Fetch new Solium emails and insert them as tasks. Returns (count_imported, error_or_None)."""
+    """Fetch new Solium/Halaxy emails and insert them as tasks. Returns (count_imported, error_or_None)."""
     db = sqlite3.connect(str(DB_PATH))
     db.row_factory = sqlite3.Row
     try:
@@ -1736,7 +1831,7 @@ def poll_gmail():
             ).fetchall()
         }
         try:
-            new_emails = gmail_poller.fetch_new_solium_emails(
+            new_emails = gmail_poller.fetch_new_patient_emails(
                 gmail_address, gmail_password, existing_ids, folder=gmail_folder
             )
         except Exception as e:
@@ -1748,7 +1843,8 @@ def poll_gmail():
             try:
                 db.execute(
                     'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, '
-                    'source_label, gmail_message_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    'source_label, gmail_message_id, status, intake_source, intake_kind) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
                         datetime.now(timezone.utc).isoformat(),
                         item['patient_name'],
@@ -1757,6 +1853,8 @@ def poll_gmail():
                         item['source_label'],
                         item['message_id'],
                         'open',
+                        item.get('intake_source'),
+                        item.get('intake_kind'),
                     ),
                 )
                 count += 1

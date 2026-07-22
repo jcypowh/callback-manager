@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block title %}Stats — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Stats</h3>
+<p class="text-muted small mb-3">How tasks have been coming in, broken down by source and type.</p>
+
+<div class="row g-3">
+  <div class="col-12 col-lg-6">
+    <div class="card">
+      <div class="card-body">
+        <h5 class="card-title">This month <span class="text-muted fw-normal">({{ month_total }} total)</span></h5>
+        {% if not month_breakdown %}
+        <p class="text-muted small mb-0">Nothing yet this month.</p>
+        {% else %}
+        <table class="table table-sm mb-0">
+          <tbody>
+            {% for b in month_breakdown %}
+            <tr><td>{{ b.label }}</td><td class="text-end">{{ b.count }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-lg-6">
+    <div class="card">
+      <div class="card-body">
+        <h5 class="card-title">All time <span class="text-muted fw-normal">({{ all_total }} total)</span></h5>
+        {% if not all_breakdown %}
+        <p class="text-muted small mb-0">Nothing recorded yet.</p>
+        {% else %}
+        <table class="table table-sm mb-0">
+          <tbody>
+            {% for b in all_breakdown %}
+            <tr><td>{{ b.label }}</td><td class="text-end">{{ b.count }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

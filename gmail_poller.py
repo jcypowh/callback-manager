@@ -1,10 +1,14 @@
-"""IMAP polling for Solium AI patient-callback emails.
+"""IMAP polling for patient-related emails from Solium AI and Halaxy.
 
-Solium forwards a "New message for <practice>" email with a "From:" (patient name)
-and "Incoming Number:" (phone) label somewhere in the body. The exact template
-hasn't been verified against a live sample yet, so parsing is defensive: if the
-labels aren't found, the full message text is kept and patient_name/phone_number
-are left blank rather than dropping the email.
+Three real templates are handled:
+1. Solium "New message for <practice>" - patient wants a human callback.
+2. Solium "New Appointment Booked" - the AI receptionist booked directly.
+3. Halaxy "Halaxy online appointment booking" - patient self-booked online.
+
+Each of (2) and (3) is further classified new vs follow-up by scanning the
+body text for "follow up" - the email's own heading/subject isn't reliable
+for this (a real Solium email was headed "New Appointment Booked" but the
+appointment details inside actually said "Follow Up appointment").
 """
 import imaplib
 import email
@@ -15,6 +19,10 @@ from email.header import decode_header
 from bs4 import BeautifulSoup
 
 SOLIUM_FROM = 'automations@solium.ai'
+HALAXY_FROM = 'noreply@halaxy.com'
+WATCHED_SENDERS = (SOLIUM_FROM, HALAXY_FROM)
+
+KNOWN_HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
 
 
 def _decode_str(value):
@@ -71,9 +79,19 @@ _BOILERPLATE_LINE = re.compile(
 )
 
 
-def _parse_body(subject, text):
-    # Solium's real subject is just "<name> has left a message" - the practice
-    # name lives in the body ("New message for <practice>"), not the subject.
+def _guess_hospital(text):
+    for h in KNOWN_HOSPITALS:
+        if h.lower() in text.lower():
+            return h
+    return None
+
+
+def _appointment_kind(text):
+    return 'appointment_followup' if re.search(r'follow[\s-]?up', text, re.IGNORECASE) else 'appointment_new'
+
+
+def _parse_solium_callback(subject, text):
+    """Solium's "New message for X" - patient wants a human to call back."""
     source_match = re.search(r'New message for\s+([^\n.]+)', text, re.IGNORECASE)
     if not source_match:
         source_match = re.search(r'New message for\s+(.+)', subject, re.IGNORECASE)
@@ -95,8 +113,6 @@ def _parse_body(subject, text):
         remainder = '\n'.join(line for line in remainder.splitlines() if line.strip())
         message_text = remainder.strip() or text
 
-    # Drop Solium's boilerplate header lines and the "not monitored" footer -
-    # keep just the actual call summary and any collected callback number.
     message_text = re.split(r'This inbox is not monitored', message_text, flags=re.IGNORECASE)[0]
     kept_lines = [l for l in message_text.splitlines() if not _BOILERPLATE_LINE.match(l.strip())]
     message_text = '\n'.join(kept_lines).strip() or message_text.strip()
@@ -106,16 +122,92 @@ def _parse_body(subject, text):
         'patient_name': patient_name,
         'phone_number': phone_number,
         'message_text': message_text,
+        'intake_source': 'solium',
+        'intake_kind': 'callback_request',
     }
 
 
-def fetch_new_solium_emails(gmail_address, app_password, existing_message_ids, days_back=3, folder='INBOX'):
-    """Returns a list of dicts (message_id, source_label, patient_name, phone_number,
-    message_text) for Solium emails not already in existing_message_ids.
+def _parse_solium_booking(subject, text):
+    """Solium's "New Appointment Booked" - the AI booked one directly."""
+    body = re.split(r'This inbox is not monitored', text, flags=re.IGNORECASE)[0]
 
-    `folder` lets this watch a dedicated Gmail label instead of the whole inbox
-    (recommended - see admin Settings page for the one-time Gmail filter setup).
-    The FROM filter is kept even when scoped to a label, as a second check."""
+    name_match = re.search(r'^Patient Name:\s*(.+)$', body, re.IGNORECASE | re.MULTILINE)
+    phone_match = re.search(r'^Phone:\s*([+\d][\d \-()]*)', body, re.IGNORECASE | re.MULTILINE)
+    details_match = re.search(r'Appointment Details:\s*(.+)', body, re.IGNORECASE | re.DOTALL)
+
+    patient_name = name_match.group(1).strip() if name_match else None
+    phone_number = phone_match.group(1).strip() if phone_match else None
+    details = details_match.group(1).strip() if details_match else body.strip()
+
+    return {
+        'source_label': _guess_hospital(details) or 'Solium AI booking',
+        'patient_name': patient_name,
+        'phone_number': phone_number,
+        'message_text': details,
+        'intake_source': 'solium',
+        'intake_kind': _appointment_kind(details),
+    }
+
+
+def _parse_halaxy_booking(subject, text):
+    """Halaxy's "Halaxy online appointment booking" - patient self-booked."""
+    name_match = re.search(r'^Name:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+    phone_match = re.search(r'^Phone:\s*([+\d][\d \-()]*)', text, re.IGNORECASE | re.MULTILINE)
+    email_match = re.search(r'^Email:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+    notes_match = re.search(r'^Notes:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+    location_match = re.search(r'^Location:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+    datetime_match = re.search(r'^Requested appointment date and time:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+    fee_match = re.search(r'^Fee\s*/\s*Service:\s*(.+)$', text, re.IGNORECASE | re.MULTILINE)
+
+    patient_name = name_match.group(1).strip() if name_match else None
+    phone_number = phone_match.group(1).strip() if phone_match else None
+    location = location_match.group(1).strip() if location_match else ''
+
+    lines = []
+    if datetime_match:
+        lines.append(f'Requested: {datetime_match.group(1).strip()}')
+    if location:
+        lines.append(f'Location: {location}')
+    if fee_match:
+        lines.append(f'Service: {fee_match.group(1).strip()}')
+    if email_match:
+        lines.append(f'Email: {email_match.group(1).strip()}')
+    if notes_match:
+        lines.append(f'Notes: {notes_match.group(1).strip()}')
+    message_text = '\n'.join(lines) or text
+
+    kind_source = (fee_match.group(1) if fee_match else '') + ' ' + text
+
+    return {
+        'source_label': _guess_hospital(location) or _guess_hospital(text) or 'Halaxy booking',
+        'patient_name': patient_name,
+        'phone_number': phone_number,
+        'message_text': message_text,
+        'intake_source': 'halaxy',
+        'intake_kind': _appointment_kind(kind_source),
+    }
+
+
+def _parse_body(sender, subject, text):
+    sender = (sender or '').lower()
+    if HALAXY_FROM in sender:
+        return _parse_halaxy_booking(subject, text)
+    # Solium: "Patient Name:" only appears in the direct-booking template,
+    # not the "wants a callback" template (which uses "From:" instead).
+    if re.search(r'^Patient Name:', text, re.IGNORECASE | re.MULTILINE):
+        return _parse_solium_booking(subject, text)
+    return _parse_solium_callback(subject, text)
+
+
+def fetch_new_patient_emails(gmail_address, app_password, existing_message_ids, days_back=3, folder='INBOX'):
+    """Returns a list of dicts (message_id, source_label, patient_name,
+    phone_number, message_text, intake_source, intake_kind) for Solium/Halaxy
+    emails not already in existing_message_ids.
+
+    `folder` lets this watch a dedicated Gmail label instead of the whole
+    inbox (recommended - see admin Settings page for the one-time Gmail
+    filter setup). The FROM filter is kept even when scoped to a label, as a
+    second check."""
     results = []
     imap = imaplib.IMAP4_SSL('imap.gmail.com')
     try:
@@ -124,23 +216,30 @@ def fetch_new_solium_emails(gmail_address, app_password, existing_message_ids, d
         if status != 'OK':
             imap.select('INBOX')
         since_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime('%d-%b-%Y')
-        status, data = imap.search(None, f'(FROM "{SOLIUM_FROM}" SINCE {since_date})')
-        if status != 'OK' or not data or not data[0]:
-            return results
-        for eid in data[0].split():
-            status, msg_data = imap.fetch(eid, '(RFC822)')
-            if status != 'OK' or not msg_data or msg_data[0] is None:
+
+        seen_uids = set()
+        for sender in WATCHED_SENDERS:
+            status, data = imap.search(None, f'(FROM "{sender}" SINCE {since_date})')
+            if status != 'OK' or not data or not data[0]:
                 continue
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
-            message_id = (msg.get('Message-ID') or '').strip()
-            if not message_id or message_id in existing_message_ids:
-                continue
-            subject = _decode_str(msg.get('Subject', ''))
-            body_text = _extract_body_text(msg)
-            parsed = _parse_body(subject, body_text)
-            parsed['message_id'] = message_id
-            results.append(parsed)
+            for eid in data[0].split():
+                if eid in seen_uids:
+                    continue
+                seen_uids.add(eid)
+                status, msg_data = imap.fetch(eid, '(RFC822)')
+                if status != 'OK' or not msg_data or msg_data[0] is None:
+                    continue
+                raw = msg_data[0][1]
+                msg = email.message_from_bytes(raw)
+                message_id = (msg.get('Message-ID') or '').strip()
+                if not message_id or message_id in existing_message_ids:
+                    continue
+                sender_header = _decode_str(msg.get('From', ''))
+                subject = _decode_str(msg.get('Subject', ''))
+                body_text = _extract_body_text(msg)
+                parsed = _parse_body(sender_header, subject, body_text)
+                parsed['message_id'] = message_id
+                results.append(parsed)
     finally:
         try:
             imap.logout()

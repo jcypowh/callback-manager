@@ -62,6 +62,11 @@
       <div>
         <div class="small text-muted">
           {{ t.created_at[:16].replace('T', ' ') }} · {{ t.source_label or 'Unknown practice' }}
+          {% if t.intake_kind == 'appointment_new' %}
+          <span class="badge bg-success">New appointment{% if t.intake_source %} ({{ t.intake_source|capitalize }}){% endif %}</span>
+          {% elif t.intake_kind == 'appointment_followup' %}
+          <span class="badge bg-primary">Follow-up{% if t.intake_source %} ({{ t.intake_source|capitalize }}){% endif %}</span>
+          {% endif %}
         </div>
         <h6 class="mb-1">
           {{ t.patient_name or '(unparsed — see message)' }}
@@ -148,6 +153,11 @@
           </div>
         </form>
         {% endif %}
+        {% if t.intake_source == 'solium' and t.intake_kind == 'appointment_new' and t.phone_number %}
+        <a href="{{ url_for('confirm_appointment', task_id=t.id) }}" class="btn btn-sm btn-success">
+          📱 Confirm appointment with patient
+        </a>
+        {% endif %}
       </div>
 
     {% else %}
@@ -219,6 +229,12 @@
             <button class="btn btn-sm btn-warning">Text now</button>
           </div>
         </form>
+        {% endif %}
+
+        {% if not is_delegate and t.intake_source == 'solium' and t.intake_kind == 'appointment_new' and t.phone_number %}
+        <a href="{{ url_for('confirm_appointment', task_id=t.id) }}" class="btn btn-sm btn-success align-self-start">
+          📱 Confirm appointment with patient
+        </a>
         {% endif %}
 
         <form method="post" action="{{ url_for('unable_to_complete', task_id=t.id) }}" class="action-group action-cant">
