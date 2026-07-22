@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block title %}Referral Drop — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Referral drop</h3>
+<p class="text-muted small mb-3">
+  For anything that lands in your own inbox or fax-to-email instead of coming through Solium —
+  drop the details (and the PDF, if there is one) here and it becomes a normal task Warren can
+  see and action, same as anything else in the queue.
+</p>
+
+<form method="post" enctype="multipart/form-data" class="card p-3" style="max-width:600px;">
+  <div class="mb-3">
+    <label class="form-label">Patient name (optional)</label>
+    <input type="text" name="patient_name" class="form-control">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Phone number (optional)</label>
+    <input type="tel" name="phone_number" class="form-control">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">What's this about?</label>
+    <textarea name="message_text" class="form-control" rows="4" required
+              placeholder="e.g. Patient emailed wanting to book a colonoscopy, prefers a Friday"></textarea>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Attachment (optional — the PDF from the email or fax)</label>
+    <input type="file" name="attachment" class="form-control">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Assign directly to (optional)</label>
+    <select name="assign_to" class="form-select">
+      <option value="">— leave in the Untouched pool —</option>
+      {% for t in targets %}
+      <option value="{{ t.id }}">{{ t.display_name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button class="btn btn-primary">Drop it in</button>
+</form>
+{% endblock %}

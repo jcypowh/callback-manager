@@ -29,6 +29,9 @@
         {% if current_user.hourly_rate or current_user.clinic_hourly_rate %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('log_time_page') }}">Log Time</a></li>
         {% endif %}
+        {% if current_user.role in ('admin', 'actioneer') %}
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('referral_drop') }}">Referral Drop</a></li>
+        {% endif %}
         {% if current_user.role == 'admin' %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('payroll') }}">Payroll</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_users') }}">Users</a></li>

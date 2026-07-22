@@ -28,6 +28,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / 'callback_manager.db'
 DOCS_DIR = DATA_DIR / 'documents'
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
+REFERRAL_DIR = DATA_DIR / 'referral_attachments'
+REFERRAL_DIR.mkdir(parents=True, exist_ok=True)
 
 HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
 DOC_TYPES = [
@@ -164,6 +166,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     phone_number TEXT,
     message_text TEXT,
     source_label TEXT,
+    attachment_filename TEXT,
     gmail_message_id TEXT UNIQUE,
     status TEXT NOT NULL DEFAULT 'open',
     claimed_by_id INTEGER,
@@ -249,7 +252,7 @@ def _migrate(db):
     """Add columns introduced after tasks/users already existed in the wild."""
     existing_task_cols = {row['name'] for row in db.execute('PRAGMA table_info(tasks)').fetchall()}
     for col, decl in [('doctor_handled_at', 'TEXT'), ('doctor_handled_by_id', 'INTEGER'),
-                       ('pending_question_for', 'INTEGER')]:
+                       ('pending_question_for', 'INTEGER'), ('attachment_filename', 'TEXT')]:
         if col not in existing_task_cols:
             db.execute(f'ALTER TABLE tasks ADD COLUMN {col} {decl}')
 
@@ -1639,6 +1642,69 @@ def seed_training_patients():
             continue
     db.commit()
     return added
+
+
+# ---------- referral drop (manual task intake, for anything not from Solium) ----------
+
+@app.route('/referral-drop', methods=['GET', 'POST'])
+def referral_drop():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can drop a referral in.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+
+    if request.method == 'POST':
+        patient_name = request.form.get('patient_name', '').strip()
+        phone_number = request.form.get('phone_number', '').strip()
+        message_text = request.form.get('message_text', '').strip()
+        assign_to = request.form.get('assign_to', '').strip()
+        f = request.files.get('attachment')
+
+        if not message_text:
+            flash('Add at least a short description of what this is.', 'danger')
+            return redirect(url_for('referral_drop'))
+
+        now = datetime.now(timezone.utc).isoformat()
+        claimed_by_id = int(assign_to) if assign_to else None
+        cur = db.execute(
+            'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, '
+            'status, claimed_by_id, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (now, patient_name or None, phone_number or None, message_text, 'Referral drop',
+             'claimed' if claimed_by_id else 'open', claimed_by_id, now if claimed_by_id else None),
+        )
+        task_id = cur.lastrowid
+
+        if f and f.filename:
+            ext = os.path.splitext(f.filename)[1] or '.pdf'
+            filename = f'{task_id}{ext}'
+            f.save(str(REFERRAL_DIR / filename))
+            db.execute('UPDATE tasks SET attachment_filename = ? WHERE id = ?', (filename, task_id))
+
+        db.commit()
+        if claimed_by_id:
+            flash('Referral dropped in and assigned.', 'success')
+        else:
+            flash('Referral dropped into the Untouched pool.', 'success')
+        return redirect(url_for('referral_drop'))
+
+    targets = db.execute(
+        "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
+    ).fetchall()
+    return render_template('referral_drop.html', targets=targets)
+
+
+@app.route('/referral-drop/<int:task_id>/attachment')
+def view_referral_attachment(task_id):
+    db = get_db()
+    task = db.execute('SELECT attachment_filename FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or not task['attachment_filename']:
+        flash('No attachment for that referral.', 'warning')
+        return redirect(url_for('queue'))
+    path = REFERRAL_DIR / task['attachment_filename']
+    if not path.exists():
+        flash('Attachment file is missing.', 'warning')
+        return redirect(url_for('queue'))
+    return send_file(str(path))
 
 
 # ---------- Gmail polling ----------

@@ -83,6 +83,13 @@
       </div>
     </div>
     <div class="mt-2" style="white-space:pre-wrap;">{{ t.message_text }}</div>
+    {% if t.attachment_filename %}
+    <div class="mt-1">
+      <a href="{{ url_for('view_referral_attachment', task_id=t.id) }}" target="_blank" class="btn btn-sm btn-outline-secondary">
+        📎 Attachment
+      </a>
+    </div>
+    {% endif %}
 
     {% if t.notes %}
     <div class="mt-2 pt-2 border-top small">
