@@ -22,7 +22,7 @@ SOLIUM_FROM = 'automations@solium.ai'
 HALAXY_FROM = 'noreply@halaxy.com'
 WATCHED_SENDERS = (SOLIUM_FROM, HALAXY_FROM)
 
-KNOWN_HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
+KNOWN_HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital', 'Northern Beaches Hospital']
 
 
 def _decode_str(value):

@@ -74,12 +74,11 @@
     <div class="form-text">Up to 11 letters, no spaces required — e.g. CallbackMgr.</div>
   </div>
   <div class="mb-3">
-    <label class="form-label">Patient confirmation link (optional)</label>
-    <input type="url" name="patient_confirmation_link" class="form-control" value="{{ patient_confirmation_link }}" placeholder="https://...">
+    <label class="form-label">Patient reply-to email (for confirmation SMS)</label>
+    <input type="email" name="patient_reply_email" class="form-control" value="{{ patient_reply_email }}" placeholder="shoregastroenterology@gmail.com">
     <div class="form-text">
-      Included in the "confirm your appointment" text sent to patients for new Solium AI bookings
-      (e.g. a Halaxy form for them to fill in their details). Leave blank to send the confirmation
-      without a link.
+      Where the "confirm your appointment" SMS (for new Solium AI bookings) asks the patient to
+      email their name, DOB, referral, and email address.
     </div>
   </div>
   <button class="btn btn-primary">Save settings</button>

@@ -872,11 +872,16 @@ def confirm_appointment(task_id):
         flash('No phone number on this task to text.', 'warning')
         return redirect(url_for('queue'))
 
-    link = cfg('patient_confirmation_link', '')
-    default_message = f"Hi {task['patient_name'] or 'there'}, this confirms your new appointment with Shore Gastroenterology."
-    if link:
-        default_message += f' Please complete your details here: {link}'
-    default_message += ' Call us if you need to reschedule.'
+    reply_email = cfg('patient_reply_email', '')
+    when_match = re.search(r'\bon\s+(.+)$', task['message_text'] or '', re.IGNORECASE)
+    appointment_when = when_match.group(1).strip().rstrip('.') if when_match else (task['message_text'] or '').strip()
+
+    default_message = f"Welcome to Shore Gastroenterology. Your appointment is confirmed on {appointment_when}."
+    if reply_email:
+        default_message += (
+            f' Please reply by email to {reply_email} with your name, DOB, referral '
+            '(as a photo or PDF), and email address.'
+        )
 
     if request.method == 'POST':
         message = request.form.get('message', '').strip()
@@ -1625,7 +1630,7 @@ def admin_settings():
             if new_api_key:
                 set_cfg('clicksend_api_key', new_api_key)
             set_cfg('sms_alpha_tag', request.form.get('sms_alpha_tag', '').strip() or 'CallbackMgr')
-            set_cfg('patient_confirmation_link', request.form.get('patient_confirmation_link', '').strip())
+            set_cfg('patient_reply_email', request.form.get('patient_reply_email', '').strip())
             flash('Settings saved.', 'success')
         elif action == 'poll_now':
             count, error = poll_gmail()
@@ -1688,7 +1693,7 @@ def admin_settings():
         clicksend_username=cfg('clicksend_username', ''),
         has_clicksend_key=bool(cfg('clicksend_api_key')),
         sms_alpha_tag=cfg('sms_alpha_tag', 'CallbackMgr'),
-        patient_confirmation_link=cfg('patient_confirmation_link', ''),
+        patient_reply_email=cfg('patient_reply_email', ''),
     )
 
 
