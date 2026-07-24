@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block title %}Fax Inbox — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Fax Inbox</h3>
+<p class="text-muted small mb-3">
+  Preview each fax and file it — Pathology/Radiology go into a searchable
+  <a href="{{ url_for('fax_archive_page') }}">archive</a>, Referral creates a task like any other.
+</p>
+
+{% if not faxes %}
+<p class="text-muted">Nothing unfiled right now.</p>
+{% else %}
+{% for f in faxes %}
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between flex-wrap gap-2 mb-2">
+      <div class="small text-muted">
+        {{ f.received_at[:16].replace('T', ' ') }} · from {{ f.from_number or 'unknown number' }}
+      </div>
+      <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>
+    </div>
+    <form method="post" action="{{ url_for('file_fax', fax_id=f.id) }}" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small mb-0">File as</label>
+        <select name="category" class="form-select form-select-sm fax-category-select" required>
+          <option value="">Choose...</option>
+          {% for key, label in categories.items() %}
+          <option value="{{ key }}">{{ label }}{% if key == 'referral' %} (needs booking){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-0">Patient name</label>
+        <input type="text" name="patient_name" class="form-control form-control-sm" style="width:160px;">
+      </div>
+      <div class="col-auto referral-only" style="display:none;">
+        <label class="form-label small mb-0">Phone</label>
+        <input type="tel" name="phone_number" class="form-control form-control-sm" style="width:130px;">
+      </div>
+      <div class="col-auto referral-only" style="display:none;">
+        <label class="form-label small mb-0">Assign to</label>
+        <select name="assign_to" class="form-select form-select-sm">
+          <option value="">Untouched pool</option>
+          {% for t in targets %}
+          <option value="{{ t.id }}">{{ t.display_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto flex-grow-1">
+        <label class="form-label small mb-0">Notes</label>
+        <input type="text" name="notes" class="form-control form-control-sm" placeholder="optional">
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-success">File</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.fax-category-select').forEach(function (select) {
+  select.addEventListener('change', function () {
+    var referralFields = this.closest('form').querySelectorAll('.referral-only');
+    var show = this.value === 'referral';
+    referralFields.forEach(function (el) { el.style.display = show ? '' : 'none'; });
+  });
+});
+</script>
+{% endblock %}

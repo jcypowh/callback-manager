@@ -31,6 +31,7 @@
         {% endif %}
         {% if current_user.role in ('admin', 'actioneer') %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('referral_drop') }}">Referral Drop</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('fax_inbox_page') }}">Fax Inbox {% if unfiled_fax_count %}<span class="badge bg-warning text-dark">{{ unfiled_fax_count }}</span>{% endif %}</a></li>
         {% endif %}
         {% if current_user.role == 'admin' %}
         <li class="nav-item"><a class="nav-link" href="{{ url_for('stats_page') }}">Stats</a></li>

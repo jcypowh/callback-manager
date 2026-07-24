@@ -21,6 +21,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import gmail_poller
+import fax_poller
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get('STORAGE_DIR', BASE_DIR)) / 'data'
@@ -30,6 +31,8 @@ DOCS_DIR = DATA_DIR / 'documents'
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 REFERRAL_DIR = DATA_DIR / 'referral_attachments'
 REFERRAL_DIR.mkdir(parents=True, exist_ok=True)
+FAX_DIR = DATA_DIR / 'faxes'
+FAX_DIR.mkdir(parents=True, exist_ok=True)
 
 HOSPITALS = ['Dee Why Endoscopy', 'Mater Hospital', 'East Sydney Private Hospital']
 DOC_TYPES = [
@@ -230,6 +233,20 @@ CREATE TABLE IF NOT EXISTS email_templates (
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fax_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL,
+    from_number TEXT,
+    pdf_filename TEXT NOT NULL,
+    gmail_message_id TEXT UNIQUE,
+    category TEXT,
+    patient_name TEXT,
+    notes TEXT,
+    filed_by_id INTEGER,
+    filed_at TEXT,
+    linked_task_id INTEGER
 );
 """
 
@@ -444,16 +461,22 @@ def admin_required(view):
 def inject_globals():
     user = current_user()
     all_users = []
+    unfiled_fax_count = 0
     if user:
         all_users = get_db().execute(
             'SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name'
         ).fetchall()
+        if user['role'] in FULL_ACCESS_ROLES:
+            unfiled_fax_count = get_db().execute(
+                "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL"
+            ).fetchone()['n']
     return {
         'current_user': user,
         'outcome_labels': OUTCOME_LABELS,
         'all_users': all_users,
         'endoscopy_manager_url': cfg('endoscopy_manager_url', '') if user else '',
         'practice_manager_url': cfg('practice_manager_url', '') if user else '',
+        'unfiled_fax_count': unfiled_fax_count,
     }
 
 
@@ -1638,6 +1661,19 @@ def admin_settings():
                 flash(f'Poll failed: {error}', 'danger')
             else:
                 flash(f'Poll complete: {count} new task(s) imported.', 'success')
+        elif action == 'save_fax':
+            set_cfg('fax_gmail_address', request.form.get('fax_gmail_address', '').strip())
+            new_fax_password = request.form.get('fax_gmail_app_password', '').strip()
+            if new_fax_password:
+                set_cfg('fax_gmail_app_password', new_fax_password)
+            set_cfg('fax_gmail_folder', request.form.get('fax_gmail_folder', 'INBOX').strip() or 'INBOX')
+            flash('Fax settings saved.', 'success')
+        elif action == 'poll_fax_now':
+            count, error = poll_fax_inbox()
+            if error:
+                flash(f'Fax poll failed: {error}', 'danger')
+            else:
+                flash(f'Fax poll complete: {count} new fax(es) imported.', 'success')
         elif action == 'change_shared_password':
             new_password = request.form.get('new_password', '')
             confirm = request.form.get('new_password_confirm', '')
@@ -1694,6 +1730,9 @@ def admin_settings():
         has_clicksend_key=bool(cfg('clicksend_api_key')),
         sms_alpha_tag=cfg('sms_alpha_tag', 'CallbackMgr'),
         patient_reply_email=cfg('patient_reply_email', ''),
+        fax_gmail_address=cfg('fax_gmail_address', ''),
+        has_fax_password=bool(cfg('fax_gmail_app_password')),
+        fax_gmail_folder=cfg('fax_gmail_folder', 'INBOX'),
     )
 
 
@@ -1807,6 +1846,115 @@ def view_referral_attachment(task_id):
     return send_file(str(path))
 
 
+# ---------- fax inbox (VOIP.net fax-to-email triage) ----------
+
+FAX_CATEGORIES = {
+    'pathology': 'Pathology',
+    'radiology': 'Radiology',
+    'referral': 'Referral',
+}
+
+
+@app.route('/fax-inbox')
+def fax_inbox_page():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can access the fax inbox.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    unfiled = db.execute(
+        "SELECT * FROM fax_documents WHERE category IS NULL ORDER BY received_at ASC"
+    ).fetchall()
+    targets = db.execute(
+        "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
+    ).fetchall()
+    return render_template('fax_inbox.html', faxes=unfiled, categories=FAX_CATEGORIES, targets=targets)
+
+
+@app.route('/fax-inbox/archive')
+def fax_archive_page():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can access the fax archive.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    q = request.args.get('q', '').strip()
+    query = "SELECT * FROM fax_documents WHERE category IN ('pathology', 'radiology')"
+    params = []
+    if q:
+        query += " AND patient_name LIKE ?"
+        params.append(f'%{q}%')
+    query += " ORDER BY filed_at DESC LIMIT 200"
+    filed = db.execute(query, params).fetchall()
+    return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q)
+
+
+@app.route('/fax-inbox/<int:fax_id>/view')
+def view_fax(fax_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can access the fax inbox.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    fax = db.execute('SELECT pdf_filename FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+    if not fax or not fax['pdf_filename']:
+        flash('Fax not found.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    path = FAX_DIR / fax['pdf_filename']
+    if not path.exists():
+        flash('Fax file is missing.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    return send_file(str(path), mimetype='application/pdf')
+
+
+@app.route('/fax-inbox/<int:fax_id>/file', methods=['POST'])
+def file_fax(fax_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can file faxes.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    fax = db.execute('SELECT * FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+    if not fax:
+        flash('Fax not found.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+
+    category = request.form.get('category', '')
+    patient_name = request.form.get('patient_name', '').strip()
+    notes = request.form.get('notes', '').strip()
+    if category not in FAX_CATEGORIES:
+        flash('Choose a category.', 'danger')
+        return redirect(url_for('fax_inbox_page'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    linked_task_id = None
+
+    if category == 'referral':
+        phone_number = request.form.get('phone_number', '').strip()
+        assign_to = request.form.get('assign_to', '').strip()
+        claimed_by_id = int(assign_to) if assign_to else None
+        message = f'Referral from fax (received from {fax["from_number"] or "unknown number"}).'
+        if notes:
+            message += f' {notes}'
+        cur = db.execute(
+            'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, '
+            'status, claimed_by_id, claimed_at, attachment_filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (now, patient_name or None, phone_number or None, message, 'Fax referral',
+             'claimed' if claimed_by_id else 'open', claimed_by_id, now if claimed_by_id else None,
+             fax['pdf_filename']),
+        )
+        linked_task_id = cur.lastrowid
+        # The task views its attachment via REFERRAL_DIR, so copy the PDF there under the new task's id.
+        task_filename = f'{linked_task_id}.pdf'
+        (REFERRAL_DIR / task_filename).write_bytes((FAX_DIR / fax['pdf_filename']).read_bytes())
+        db.execute('UPDATE tasks SET attachment_filename = ? WHERE id = ?', (task_filename, linked_task_id))
+
+    db.execute(
+        'UPDATE fax_documents SET category = ?, patient_name = ?, notes = ?, filed_by_id = ?, '
+        'filed_at = ?, linked_task_id = ? WHERE id = ?',
+        (category, patient_name or None, notes or None, session['user_id'], now, linked_task_id, fax_id),
+    )
+    db.commit()
+    flash(f'Filed as {FAX_CATEGORIES[category]}.', 'success')
+    return redirect(url_for('fax_inbox_page'))
+
+
 # ---------- Gmail polling ----------
 
 def poll_gmail():
@@ -1871,6 +2019,55 @@ def poll_gmail():
         db.close()
 
 
+def poll_fax_inbox():
+    """Fetch new VOIP.net fax notifications and save them as unfiled fax
+    documents. Returns (count_imported, error_or_None)."""
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    try:
+        fax_address = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_address'").fetchone()
+        fax_password = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_app_password'").fetchone()
+        fax_folder = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_folder'").fetchone()
+        fax_address = fax_address['value'] if fax_address else None
+        fax_password = fax_password['value'] if fax_password else None
+        fax_folder = fax_folder['value'] if fax_folder else 'INBOX'
+        if not fax_address or not fax_password:
+            return 0, 'Fax inbox is not set up yet — configure it under Settings first.'
+
+        existing_ids = {
+            row['gmail_message_id']
+            for row in db.execute(
+                'SELECT gmail_message_id FROM fax_documents WHERE gmail_message_id IS NOT NULL'
+            ).fetchall()
+        }
+        try:
+            new_faxes = fax_poller.fetch_new_faxes(fax_address, fax_password, existing_ids, folder=fax_folder)
+        except Exception as e:
+            logger.exception('Fax poll failed')
+            return 0, str(e)
+
+        count = 0
+        for item in new_faxes:
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                cur = db.execute(
+                    'INSERT INTO fax_documents (received_at, from_number, pdf_filename, gmail_message_id) '
+                    'VALUES (?, ?, ?, ?)',
+                    (now, item['from_number'], '', item['message_id']),
+                )
+            except sqlite3.IntegrityError:
+                continue
+            fax_id = cur.lastrowid
+            filename = f'{fax_id}.pdf'
+            (FAX_DIR / filename).write_bytes(item['pdf_bytes'])
+            db.execute('UPDATE fax_documents SET pdf_filename = ? WHERE id = ?', (filename, fax_id))
+            count += 1
+        db.commit()
+        return count, None
+    finally:
+        db.close()
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
     db = sqlite3.connect(str(DB_PATH))
@@ -1878,6 +2075,7 @@ def start_scheduler():
     db.close()
     interval = int(row[0]) if row and row[0] else 90
     scheduler.add_job(poll_gmail, 'interval', seconds=interval, id='gmail_poll', replace_existing=True)
+    scheduler.add_job(poll_fax_inbox, 'interval', seconds=interval, id='fax_poll', replace_existing=True)
     scheduler.start()
     return scheduler
 

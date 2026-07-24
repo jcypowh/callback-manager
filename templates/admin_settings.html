@@ -89,6 +89,35 @@
   <button class="btn btn-outline-primary">Poll Gmail now</button>
 </form>
 
+<form method="post" class="card p-3 mb-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="save_fax">
+  <h5>Fax Inbox (VOIP.net)</h5>
+  <p class="text-muted small">
+    A separate Gmail account that receives fax-to-email notifications from
+    do_not_reply@au.voipcloud.online. Kept separate from the Solium/Halaxy inbox above.
+  </p>
+  <div class="mb-3">
+    <label class="form-label">Gmail address</label>
+    <input type="email" name="fax_gmail_address" class="form-control" value="{{ fax_gmail_address }}" placeholder="gastroenterologyjtu@gmail.com">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Gmail app password</label>
+    <input type="password" name="fax_gmail_app_password" class="form-control" placeholder="{% if has_fax_password %}(unchanged){% else %}not set{% endif %}">
+    <div class="form-text">A separate app password for this account, with IMAP enabled. Leave blank to keep the current one.</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Gmail folder/label to watch</label>
+    <input type="text" name="fax_gmail_folder" class="form-control" value="{{ fax_gmail_folder }}" placeholder="INBOX">
+    <div class="form-text">Same idea as above — leave as INBOX, or point at a dedicated label if this account gets other mail you'd rather not scan every time.</div>
+  </div>
+  <button class="btn btn-primary">Save fax settings</button>
+</form>
+
+<form method="post" class="mb-3">
+  <input type="hidden" name="action" value="poll_fax_now">
+  <button class="btn btn-outline-primary">Poll fax inbox now</button>
+</form>
+
 <form method="post" class="card p-3 mb-3 d-flex flex-row gap-2 align-items-end" style="max-width:500px;">
   <input type="hidden" name="action" value="send_test_email">
   <div class="flex-grow-1">
