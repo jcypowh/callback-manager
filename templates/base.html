@@ -39,13 +39,11 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('email_templates_page') }}">Email Templates</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('admin_settings') }}">Settings</a></li>
         {% endif %}
-        {% if current_user.role in ('admin', 'actioneer') %}
-          {% if endoscopy_manager_url %}
-          <li class="nav-item"><a class="nav-link" href="{{ endoscopy_manager_url }}" target="_blank" rel="noopener">Endoscopy Manager <i class="fa-solid fa-arrow-up-right-from-square fa-2xs"></i></a></li>
-          {% endif %}
-          {% if practice_manager_url %}
-          <li class="nav-item"><a class="nav-link" href="{{ practice_manager_url }}" target="_blank" rel="noopener">Practice Manager <i class="fa-solid fa-arrow-up-right-from-square fa-2xs"></i></a></li>
-          {% endif %}
+        {% if endoscopy_manager_url %}
+        <li class="nav-item"><a class="nav-link" href="{{ endoscopy_manager_url }}" target="_blank" rel="noopener">Endoscopy Manager <i class="fa-solid fa-arrow-up-right-from-square fa-2xs"></i></a></li>
+        {% endif %}
+        {% if practice_manager_url %}
+        <li class="nav-item"><a class="nav-link" href="{{ practice_manager_url }}" target="_blank" rel="noopener">Practice Manager <i class="fa-solid fa-arrow-up-right-from-square fa-2xs"></i></a></li>
         {% endif %}
       </ul>
       <form method="post" action="{{ url_for('switch_user') }}" class="d-inline me-2">
