@@ -98,13 +98,9 @@
 
     {% if t.notes %}
     <div class="mt-2 pt-2 border-top small">
-      {% if is_delegate or view == 'questions' %}
-        {% for n in t.notes|reverse %}
-        <div class="mb-1"><span class="text-muted">{{ n.created_at[:16].replace('T', ' ') }} {{ n.author_name or '' }}:</span> {{ n.note }}</div>
-        {% endfor %}
-      {% else %}
-        <span class="text-muted fst-italic">Last: {{ t.notes[0].note }}</span>
-      {% endif %}
+      {% for n in t.notes|reverse %}
+      <div class="mb-1" style="white-space:pre-wrap;"><span class="text-muted">{{ n.created_at[:16].replace('T', ' ') }} {{ n.author_name or '' }}:</span> {{ n.note }}</div>
+      {% endfor %}
     </div>
     {% endif %}
   </div>
