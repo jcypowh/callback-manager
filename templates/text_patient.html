@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block title %}Text Patient — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-3">Text patient</h3>
+<div class="card p-3 mb-3" style="max-width:600px;">
+  <p class="mb-1"><strong>Patient:</strong> {{ task.patient_name or '(unparsed)' }}</p>
+  <p class="mb-0">
+    <strong>Number:</strong>
+    {% if task.phone_number %}<a href="tel:{{ task.phone_number }}">{{ task.phone_number }}</a>{% else %}—{% endif %}
+  </p>
+</div>
+
+<div class="alert alert-warning" style="max-width:600px;">
+  This is one-way SMS — there's no inbound reply handling. Always give the patient another way to
+  get back to you (an email address or phone number) in the message.
+</div>
+
+<form method="post" class="card p-3" style="max-width:600px;">
+  <div class="mb-3">
+    <label class="form-label">Message</label>
+    <textarea name="message" class="form-control" rows="4" required>{{ default_message }}</textarea>
+  </div>
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-primary">Send to patient</button>
+    <a href="{{ url_for('queue') }}" class="btn btn-outline-secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

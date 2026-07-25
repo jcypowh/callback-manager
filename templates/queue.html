@@ -38,11 +38,11 @@
 </p>
 {% else %}
 <p class="text-muted small mb-3">
-  Four separate things, so they don't get mixed up: <strong class="text-success">Finish</strong> it,
-  <strong class="text-info">ask a question</strong> without giving it up,
-  <strong class="text-primary">hand it over</strong> to someone else's box, or say
-  <strong class="text-danger">you can't do it</strong> — which sends it back (to the pool, or to a
-  specific person) and logs why.
+  <strong class="text-success">Resolve</strong> when it's fully done,
+  <strong class="text-success">act</strong> on it (email, text, or log a call note) without
+  finishing it, <strong class="text-info">ask a question</strong> without giving it up, or
+  <strong class="text-primary">hand it over</strong> to someone else's box — always to a named
+  person, with or without a reason.
 </p>
 {% endif %}
 
@@ -157,17 +157,37 @@
       </div>
 
     {% else %}
+      <div class="mb-2 text-center">
+        <a href="{{ url_for('resolve_task', task_id=t.id) }}" class="btn btn-success btn-lg px-4"
+           title="Fully done - records an outcome and archives it">
+          <i class="fa-solid fa-circle-check"></i> Resolve
+        </a>
+      </div>
       <div class="d-flex flex-wrap gap-2">
 
-        <div class="action-group action-finish">
-          <label class="action-label">Finish</label>
+        <div class="action-group action-do">
+          <label class="action-label">Action</label>
           <div class="d-flex gap-1 flex-wrap">
-            <a href="{{ url_for('resolve_task', task_id=t.id) }}" class="btn btn-sm btn-success"
-               title="Fully done - records an outcome and archives it">Resolve...</a>
             <a href="{{ url_for('email_task', task_id=t.id) }}" class="btn btn-sm btn-outline-success"
                title="Write and send an email to the patient">Email</a>
+            {% if t.phone_number %}
+            <a href="{{ url_for('text_patient', task_id=t.id) }}" class="btn btn-sm btn-outline-success"
+               title="One-way SMS to the patient">SMS</a>
+            {% endif %}
           </div>
         </div>
+
+        <form method="post" action="{{ url_for('add_task_note', task_id=t.id) }}" class="action-group action-notes">
+          <label class="action-label">Notes on telephone call</label>
+          <div class="d-flex gap-1">
+            <input type="text" name="note" class="form-control form-control-sm" style="width:200px;"
+                   placeholder="What happened on the call...">
+            {% if current_user.hourly_rate %}
+            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
+            {% endif %}
+            <button class="btn btn-sm btn-outline-secondary" title="Saves a note - task stays yours and active">Log</button>
+          </div>
+        </form>
 
         {% if not t.pending_question_for and handoff_targets %}
         <form method="post" action="{{ url_for('ask_question', task_id=t.id) }}" class="action-group action-ask">
@@ -184,18 +204,6 @@
         </form>
         {% endif %}
 
-        {% if is_delegate %}
-        <form method="post" action="{{ url_for('forward_to_doctor', task_id=t.id) }}" class="action-group action-handover">
-          <label class="action-label">Handover to Dr Tu</label>
-          <div class="d-flex gap-1">
-            <input type="text" name="reason" class="form-control form-control-sm" placeholder="What he needs to know">
-            {% if current_user.hourly_rate %}
-            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
-            {% endif %}
-            <button class="btn btn-sm btn-primary">Send</button>
-          </div>
-        </form>
-        {% else %}
         {% if handoff_targets %}
         <form method="post" action="{{ url_for('handoff_task', task_id=t.id) }}" class="action-group action-handover">
           <label class="action-label">Handover to</label>
@@ -205,11 +213,13 @@
               <option value="{{ hu.id }}">{{ hu.display_name }}</option>
               {% endfor %}
             </select>
-            <input type="text" name="instructions" class="form-control form-control-sm" placeholder="Instructions (optional)">
+            <input type="text" name="instructions" class="form-control form-control-sm" placeholder="Why (optional)">
+            {% if current_user.hourly_rate %}
+            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
+            {% endif %}
             <button class="btn btn-sm btn-primary">Send</button>
           </div>
         </form>
-        {% endif %}
         {% endif %}
 
         {% if notify_targets %}
@@ -233,46 +243,17 @@
         </a>
         {% endif %}
 
-        <form method="post" action="{{ url_for('unable_to_complete', task_id=t.id) }}" class="action-group action-cant">
-          <label class="action-label">I can't do this</label>
-          <div class="d-flex gap-1">
-            {% if handoff_targets %}
-            <select name="target_id" class="form-select form-select-sm" style="max-width:150px;">
-              <option value="">Back to pool</option>
-              {% for hu in handoff_targets %}
-              <option value="{{ hu.id }}">To {{ hu.display_name }}</option>
-              {% endfor %}
-            </select>
-            {% endif %}
-            <input type="text" name="reason" class="form-control form-control-sm"
-                   placeholder="{{ 'Why (required)' if is_delegate else 'Why (optional)' }}">
-            {% if current_user.hourly_rate %}
-            <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
-            {% endif %}
-            <button class="btn btn-sm btn-danger"
-                    title="{{ 'Requires at least one logged attempt first.' if is_delegate else 'No reason needed between you and Sally, but adding one helps whoever picks it up.' }}">Send back</button>
-          </div>
-        </form>
-
+        {% if not is_delegate %}
         <div class="action-group action-utility">
-          <label class="action-label">Other</label>
+          <label class="action-label">Finance</label>
           <div class="d-flex flex-wrap gap-1">
-            <form method="post" action="{{ url_for('add_task_note', task_id=t.id) }}" class="d-flex gap-1">
-              <input type="text" name="note" class="form-control form-control-sm" style="width:160px;"
-                     placeholder="Log an attempt...">
-              {% if current_user.hourly_rate %}
-              <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
-              {% endif %}
-              <button class="btn btn-sm btn-outline-secondary" title="Saves a note - task stays yours and active">Log</button>
-            </form>
-            {% if not is_delegate %}
             <form method="post" action="{{ url_for('unclaim_task', task_id=t.id) }}">
               <button class="btn btn-sm btn-outline-secondary"
                       title="Misclick undo - no reason needed, no payment, goes straight back to Untouched">Release (misclick)</button>
             </form>
-            {% endif %}
           </div>
         </div>
+        {% endif %}
 
       </div>
     {% endif %}
@@ -301,10 +282,10 @@
   color: #6c757d;
   margin-bottom: .25rem;
 }
-.action-finish   { border-left-color: #198754; }
+.action-do       { border-left-color: #198754; }
+.action-notes    { border-left-color: #6f42c1; }
 .action-ask      { border-left-color: #0dcaf0; }
 .action-handover { border-left-color: #0d6efd; }
-.action-cant     { border-left-color: #dc3545; }
 .action-notify   { border-left-color: #fd7e14; }
 .action-utility  { border-left-color: #adb5bd; background: #f8f9fa; }
 </style>

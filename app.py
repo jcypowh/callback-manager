@@ -65,14 +65,15 @@ def _to_e164(number):
     return '+' + digits
 
 
-def _send_sms(to_number, message):
+def _send_sms(to_number, message, alpha_tag=None):
     """Send via ClickSend (same API/pattern as review_sender). Returns None on
-    success, or an error message string on failure."""
+    success, or an error message string on failure. Pass alpha_tag to override
+    the default sender name (e.g. a patient-facing tag vs. the staff one)."""
     username = cfg('clicksend_username')
     api_key = cfg('clicksend_api_key')
     if not username or not api_key:
         return 'ClickSend is not set up yet — configure it under Settings first.'
-    alpha_tag = cfg('sms_alpha_tag') or 'CallbackMgr'
+    alpha_tag = alpha_tag or cfg('sms_alpha_tag') or 'CallbackMgr'
 
     payload = {'messages': [{
         'source': 'sdk',
@@ -812,34 +813,60 @@ def claim_task(task_id):
 
 @app.route('/task/<int:task_id>/handoff', methods=['POST'])
 def handoff_task(task_id):
-    if session.get('role') not in FULL_ACCESS_ROLES:
-        flash('Only Dr Tu or Sally can hand off tasks.', 'warning')
-        return redirect(url_for('queue'))
     db = get_db()
     task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    target_id = request.form.get('target_id')
-    instructions = request.form.get('instructions', '').strip()
-    target = db.execute(
-        "SELECT * FROM users WHERE id = ? AND active = 1", (target_id,)
-    ).fetchone()
-    if not task or task['status'] == 'done' or not target:
-        flash('Could not hand off that task.', 'warning')
+    if not task or task['status'] == 'done':
+        flash('That task is already resolved.', 'warning')
+        return redirect(url_for('queue'))
+    if not _can_manage_task(task):
+        flash('That task is not assigned to you.', 'warning')
         return redirect(url_for('queue'))
 
+    user = current_user()
+    target_id = request.form.get('target_id')
+    instructions = request.form.get('instructions', '').strip()
+    target = db.execute("SELECT * FROM users WHERE id = ? AND active = 1", (target_id,)).fetchone()
+    if not target:
+        flash('Choose who to hand this off to.', 'warning')
+        return redirect(url_for('queue'))
+    if user['role'] == 'delegate' and target['role'] not in FULL_ACCESS_ROLES:
+        flash('You can only hand off to Dr Tu or Sally.', 'warning')
+        return redirect(url_for('queue'))
+
+    # Anti-ping-pong: a delegate must have logged at least one real attempt on
+    # this task before handing it off - stops "claim, bounce, claim, bounce"
+    # churning out paid minutes for zero actual effort.
+    if user['role'] == 'delegate':
+        logged = db.execute(
+            'SELECT COUNT(*) AS n FROM task_notes WHERE task_id = ? AND author_id = ?',
+            (task_id, user['id']),
+        ).fetchone()['n']
+        if not logged:
+            flash('Log at least one attempt first (what you tried) before handing this off.', 'warning')
+            return redirect(url_for('queue'))
+
+    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
+    if error:
+        flash(error, 'warning')
+        return redirect(url_for('queue'))
+
+    now = datetime.now(timezone.utc).isoformat()
     db.execute(
         "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
         "pending_question_for = NULL WHERE id = ?",
-        (target['id'], datetime.now(timezone.utc).isoformat(), task_id),
+        (target['id'], now, task_id),
     )
-    note = (f"Handed to {target['display_name']} by {session.get('display_name')}: {instructions}" if instructions
-            else f"Handed to {target['display_name']} by {session.get('display_name')} — "
+    note = (f"Handed to {target['display_name']} by {user['display_name']}: {instructions}" if instructions
+            else f"Handed to {target['display_name']} by {user['display_name']} — "
                  "no specific instructions, just call and find out what's needed.")
     db.execute(
         'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
-        (task_id, session['user_id'], datetime.now(timezone.utc).isoformat(), note),
+        (task_id, user['id'], now, note),
     )
+    _log_time(db, task_id, user, minutes_val, now)
     db.commit()
-    flash(f"Handed off to {target['display_name']}.", 'success')
+    paid_note = f' ({minutes_val:g} min logged)' if minutes_val else ''
+    flash(f"Handed off to {target['display_name']}{paid_note}.", 'success')
     return redirect(url_for('queue'))
 
 
@@ -911,7 +938,7 @@ def confirm_appointment(task_id):
         if not message:
             flash('Message cannot be empty.', 'danger')
             return render_template('confirm_appointment.html', task=task, default_message=message)
-        error = _send_sms(task['phone_number'], message)
+        error = _send_sms(task['phone_number'], message, alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'))
         if error:
             flash(f'Could not send SMS: {error}', 'danger')
             return render_template('confirm_appointment.html', task=task, default_message=message)
@@ -1078,117 +1105,46 @@ def resolve_task(task_id):
     return render_template('resolve.html', task=task, notes=notes)
 
 
-@app.route('/task/<int:task_id>/forward-to-doctor', methods=['POST'])
-def forward_to_doctor(task_id):
+@app.route('/task/<int:task_id>/sms', methods=['GET', 'POST'])
+def text_patient(task_id):
+    """One-way SMS to the patient - there's no inbound handling, so the
+    message always needs to give them another way to actually reply."""
     db = get_db()
     task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    reason = request.form.get('reason', '').strip()
     if not task or task['status'] == 'done':
         flash('That task is already resolved.', 'warning')
         return redirect(url_for('queue'))
     if not _can_manage_task(task):
         flash('That task is not assigned to you.', 'warning')
         return redirect(url_for('queue'))
-    if not reason:
-        flash('Add a note for Dr Tu — he needs enough detail to call the patient himself.', 'danger')
-        return redirect(url_for('queue'))
-    doctor = db.execute('SELECT * FROM users WHERE is_doctor = 1 AND active = 1').fetchone()
-    if not doctor:
-        flash('No one is set as the doctor yet — set this under Users first.', 'danger')
+    if not task['phone_number']:
+        flash('No phone number on this task to text.', 'warning')
         return redirect(url_for('queue'))
 
-    user = current_user()
-    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
-    if error:
-        flash(error, 'warning')
-        return redirect(url_for('queue'))
+    reply_email = cfg('patient_reply_email', '')
+    default_message = ''
+    if reply_email:
+        default_message = f'Reply by email to {reply_email} if you need to get back to us.'
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
-        "pending_question_for = NULL WHERE id = ?",
-        (doctor['id'], now, task_id),
-    )
-    db.execute(
-        'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
-        (task_id, user['id'], now, f"Forwarded to {doctor['display_name']}: {reason}"),
-    )
-    _log_time(db, task_id, user, minutes_val, now)
-    db.commit()
-    flash(f'Forwarded to {doctor["display_name"]}.', 'success')
-    return redirect(url_for('queue'))
-
-
-@app.route('/task/<int:task_id>/unable', methods=['POST'])
-def unable_to_complete(task_id):
-    db = get_db()
-    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    reason = request.form.get('reason', '').strip()
-    target_id = request.form.get('target_id', '').strip()
-    if not task or task['status'] == 'done':
-        flash('That task is already resolved.', 'warning')
-        return redirect(url_for('queue'))
-    if not _can_manage_task(task):
-        flash('That task is not assigned to you.', 'warning')
-        return redirect(url_for('queue'))
-
-    user = current_user()
-
-    # Warren's paid for this, so he owes a reason every time. Dr Tu and Sally
-    # aren't paid for it and work together closely enough not to need one.
-    if user['role'] == 'delegate' and not reason:
-        flash('Add a reason so whoever picks this up next has context.', 'warning')
-        return redirect(url_for('queue'))
-
-    # Anti-ping-pong: a delegate must have logged at least one real attempt on
-    # this task before they're allowed to hand it back — stops "claim, bounce,
-    # claim, bounce" churning out paid minutes for zero actual effort.
-    if user['role'] == 'delegate':
-        logged = db.execute(
-            'SELECT COUNT(*) AS n FROM task_notes WHERE task_id = ? AND author_id = ?',
-            (task_id, user['id']),
-        ).fetchone()['n']
-        if not logged:
-            flash('Log at least one attempt first (what you tried) before handing this back.', 'warning')
-            return redirect(url_for('queue'))
-
-    minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
-    if error:
-        flash(error, 'warning')
-        return redirect(url_for('queue'))
-
-    now = datetime.now(timezone.utc).isoformat()
-    target = None
-    if target_id:
-        target = db.execute('SELECT * FROM users WHERE id = ? AND active = 1', (target_id,)).fetchone()
-
-    if target:
+    if request.method == 'POST':
+        message = request.form.get('message', '').strip()
+        if not message:
+            flash('Message cannot be empty.', 'danger')
+            return render_template('text_patient.html', task=task, default_message=message)
+        error = _send_sms(task['phone_number'], message, alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'))
+        if error:
+            flash(f'Could not send SMS: {error}', 'danger')
+            return render_template('text_patient.html', task=task, default_message=message)
+        now = datetime.now(timezone.utc).isoformat()
         db.execute(
-            "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
-            "pending_question_for = NULL WHERE id = ?",
-            (target['id'], now, task_id),
+            'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
+            (task_id, session['user_id'], now, f'Sent SMS to patient: "{message}"'),
         )
-        destination = f"to {target['display_name']}"
-    else:
-        db.execute(
-            "UPDATE tasks SET status = 'open', claimed_by_id = NULL, claimed_at = NULL, "
-            "pending_question_for = NULL WHERE id = ?",
-            (task_id,),
-        )
-        destination = "to the Untouched pool"
+        db.commit()
+        flash('SMS sent to patient.', 'success')
+        return redirect(url_for('queue'))
 
-    note = f"Unable to complete — handed back {destination} by {user['display_name']}"
-    note += f": {reason}" if reason else " (no reason given)."
-    db.execute(
-        'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
-        (task_id, user['id'], now, note),
-    )
-    _log_time(db, task_id, user, minutes_val, now)
-    paid_note = f' ({minutes_val:g} min logged)' if minutes_val else ''
-    db.commit()
-    dest_label = target['display_name'] if target else 'the Untouched pool'
-    flash(f'Handed back to {dest_label}{paid_note}.', 'success')
-    return redirect(url_for('queue'))
+    return render_template('text_patient.html', task=task, default_message=default_message)
 
 
 @app.route('/task/<int:task_id>/email', methods=['GET', 'POST'])
@@ -1654,6 +1610,7 @@ def admin_settings():
                 set_cfg('clicksend_api_key', new_api_key)
             set_cfg('sms_alpha_tag', request.form.get('sms_alpha_tag', '').strip() or 'CallbackMgr')
             set_cfg('patient_reply_email', request.form.get('patient_reply_email', '').strip())
+            set_cfg('patient_sms_alpha_tag', request.form.get('patient_sms_alpha_tag', '').strip() or 'DrJeffreyTu')
             flash('Settings saved.', 'success')
         elif action == 'poll_now':
             count, error = poll_gmail()
@@ -1730,6 +1687,7 @@ def admin_settings():
         has_clicksend_key=bool(cfg('clicksend_api_key')),
         sms_alpha_tag=cfg('sms_alpha_tag', 'CallbackMgr'),
         patient_reply_email=cfg('patient_reply_email', ''),
+        patient_sms_alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'),
         fax_gmail_address=cfg('fax_gmail_address', ''),
         has_fax_password=bool(cfg('fax_gmail_app_password')),
         fax_gmail_folder=cfg('fax_gmail_folder', 'INBOX'),
