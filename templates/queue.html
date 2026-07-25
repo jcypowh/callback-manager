@@ -244,15 +244,10 @@
         {% endif %}
 
         {% if not is_delegate %}
-        <div class="action-group action-utility">
-          <label class="action-label">Finance</label>
-          <div class="d-flex flex-wrap gap-1">
-            <form method="post" action="{{ url_for('unclaim_task', task_id=t.id) }}">
-              <button class="btn btn-sm btn-outline-secondary"
-                      title="Misclick undo - no reason needed, no payment, goes straight back to Untouched">Release (misclick)</button>
-            </form>
-          </div>
-        </div>
+        <form method="post" action="{{ url_for('unclaim_task', task_id=t.id) }}" class="align-self-start">
+          <button class="btn btn-sm btn-outline-secondary"
+                  title="Misclick undo - no reason needed, no payment, goes straight back to Untouched">Release (misclick)</button>
+        </form>
         {% endif %}
 
       </div>
@@ -287,7 +282,6 @@
 .action-ask      { border-left-color: #0dcaf0; }
 .action-handover { border-left-color: #0d6efd; }
 .action-notify   { border-left-color: #fd7e14; }
-.action-utility  { border-left-color: #adb5bd; background: #f8f9fa; }
 </style>
 <script>
 // Keep the queue reasonably fresh so nobody's looking at a stale list - but
