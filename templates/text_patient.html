@@ -16,6 +16,12 @@
 </div>
 
 <form method="post" class="card p-3" style="max-width:600px;">
+  {% if not task.phone_number %}
+  <div class="mb-3">
+    <label class="form-label">Phone number <span class="text-muted fw-normal">(not on file yet — saved to this task once sent)</span></label>
+    <input type="tel" name="phone_number" class="form-control" placeholder="04xx xxx xxx" required>
+  </div>
+  {% endif %}
   <div class="mb-3">
     <label class="form-label">Message</label>
     <textarea name="message" class="form-control" rows="4" required>{{ default_message }}</textarea>

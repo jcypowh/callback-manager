@@ -1117,9 +1117,6 @@ def text_patient(task_id):
     if not _can_manage_task(task):
         flash('That task is not assigned to you.', 'warning')
         return redirect(url_for('queue'))
-    if not task['phone_number']:
-        flash('No phone number on this task to text.', 'warning')
-        return redirect(url_for('queue'))
 
     reply_email = cfg('patient_reply_email', '')
     default_message = ''
@@ -1127,15 +1124,21 @@ def text_patient(task_id):
         default_message = f'Reply by email to {reply_email} if you need to get back to us.'
 
     if request.method == 'POST':
+        phone_number = request.form.get('phone_number', '').strip() or task['phone_number']
         message = request.form.get('message', '').strip()
+        if not phone_number:
+            flash('Enter a phone number to text.', 'danger')
+            return render_template('text_patient.html', task=task, default_message=message)
         if not message:
             flash('Message cannot be empty.', 'danger')
             return render_template('text_patient.html', task=task, default_message=message)
-        error = _send_sms(task['phone_number'], message, alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'))
+        error = _send_sms(phone_number, message, alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'))
         if error:
             flash(f'Could not send SMS: {error}', 'danger')
             return render_template('text_patient.html', task=task, default_message=message)
         now = datetime.now(timezone.utc).isoformat()
+        if not task['phone_number']:
+            db.execute('UPDATE tasks SET phone_number = ? WHERE id = ?', (phone_number, task_id))
         db.execute(
             'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
             (task_id, session['user_id'], now, f'Sent SMS to patient: "{message}"'),

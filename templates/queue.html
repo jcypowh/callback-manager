@@ -170,10 +170,8 @@
           <div class="d-flex gap-1 flex-wrap">
             <a href="{{ url_for('email_task', task_id=t.id) }}" class="btn btn-sm btn-outline-success"
                title="Write and send an email to the patient">Email</a>
-            {% if t.phone_number %}
             <a href="{{ url_for('text_patient', task_id=t.id) }}" class="btn btn-sm btn-outline-success"
                title="One-way SMS to the patient">SMS</a>
-            {% endif %}
           </div>
         </div>
 
