@@ -56,12 +56,15 @@
 {% else %}
 
 {% for t in tasks %}
-<div class="card mb-3">
+<div class="card mb-3{% if t.urgency %} card-urgency-{{ t.urgency }}{% endif %}">
   <div class="card-body pb-2">
     <div class="d-flex justify-content-between flex-wrap gap-2">
       <div>
         <div class="small text-muted">
           {{ t.created_at[:16].replace('T', ' ') }} · {{ t.source_label or 'Unknown practice' }}
+          {% if t.urgency %}
+          <span class="badge urgency-badge-{{ t.urgency }}">{{ urgency_levels[t.urgency] }}</span>
+          {% endif %}
           {% if t.intake_kind == 'appointment_new' %}
           <span class="badge bg-success">New appointment{% if t.intake_source %} ({{ t.intake_source|capitalize }}){% endif %}</span>
           {% elif t.intake_kind == 'appointment_followup' %}
@@ -87,6 +90,16 @@
         {% endif %}
       </div>
     </div>
+    {% if not is_delegate %}
+    <form method="post" action="{{ url_for('set_urgency', task_id=t.id) }}" class="d-flex align-items-center gap-1 mt-1">
+      <span class="small text-muted me-1">Urgency:</span>
+      {% for key, label in urgency_levels.items() %}
+      <button type="submit" name="urgency" value="{{ key }}"
+              class="btn btn-sm urgency-btn-{{ key }}{{ ' active' if t.urgency == key else '' }}"
+              title="{{ label }}">●</button>
+      {% endfor %}
+    </form>
+    {% endif %}
     <div class="mt-2" style="white-space:pre-wrap;">{{ t.message_text }}</div>
     {% if t.attachment_filename %}
     <div class="mt-1">
@@ -127,6 +140,12 @@
             <select name="target_id" class="form-select form-select-sm">
               {% for hu in handoff_targets %}
               <option value="{{ hu.id }}">{{ hu.display_name }}</option>
+              {% endfor %}
+            </select>
+            <select name="urgency" class="form-select form-select-sm" style="max-width:130px;">
+              <option value="">Urgency...</option>
+              {% for key, label in urgency_levels.items() %}
+              <option value="{{ key }}" {% if t.urgency == key %}selected{% endif %}>{{ label }}</option>
               {% endfor %}
             </select>
             <input type="text" name="instructions" class="form-control form-control-sm"
@@ -211,6 +230,14 @@
               <option value="{{ hu.id }}">{{ hu.display_name }}</option>
               {% endfor %}
             </select>
+            {% if not is_delegate %}
+            <select name="urgency" class="form-select form-select-sm" style="max-width:130px;">
+              <option value="">Urgency...</option>
+              {% for key, label in urgency_levels.items() %}
+              <option value="{{ key }}" {% if t.urgency == key %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+            {% endif %}
             <input type="text" name="instructions" class="form-control form-control-sm" placeholder="Why (optional)">
             {% if current_user.hourly_rate %}
             <input type="number" step="1" min="0" name="minutes" class="form-control form-control-sm" style="width:70px;" placeholder="min" required>
@@ -280,6 +307,21 @@
 .action-ask      { border-left-color: #0dcaf0; }
 .action-handover { border-left-color: #0d6efd; }
 .action-notify   { border-left-color: #fd7e14; }
+
+.card-urgency-red    { border-left: 5px solid #dc3545; }
+.card-urgency-yellow { border-left: 5px solid #ffc107; }
+.card-urgency-green  { border-left: 5px solid #198754; }
+
+.urgency-badge-red    { background-color: #dc3545; color: #fff; }
+.urgency-badge-yellow { background-color: #ffc107; color: #000; }
+.urgency-badge-green  { background-color: #198754; color: #fff; }
+
+.urgency-btn-red    { border: 1px solid #dc3545; color: #dc3545; }
+.urgency-btn-red.active    { background-color: #dc3545; color: #fff; }
+.urgency-btn-yellow { border: 1px solid #ffc107; color: #997404; }
+.urgency-btn-yellow.active { background-color: #ffc107; color: #000; }
+.urgency-btn-green  { border: 1px solid #198754; color: #198754; }
+.urgency-btn-green.active { background-color: #198754; color: #fff; }
 </style>
 <script>
 // Keep the queue reasonably fresh so nobody's looking at a stale list - but

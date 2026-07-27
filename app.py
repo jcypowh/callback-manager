@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     attachment_filename TEXT,
     intake_source TEXT,
     intake_kind TEXT,
+    urgency TEXT,
     gmail_message_id TEXT UNIQUE,
     status TEXT NOT NULL DEFAULT 'open',
     claimed_by_id INTEGER,
@@ -273,7 +274,7 @@ def _migrate(db):
     existing_task_cols = {row['name'] for row in db.execute('PRAGMA table_info(tasks)').fetchall()}
     for col, decl in [('doctor_handled_at', 'TEXT'), ('doctor_handled_by_id', 'INTEGER'),
                        ('pending_question_for', 'INTEGER'), ('attachment_filename', 'TEXT'),
-                       ('intake_source', 'TEXT'), ('intake_kind', 'TEXT')]:
+                       ('intake_source', 'TEXT'), ('intake_kind', 'TEXT'), ('urgency', 'TEXT')]:
         if col not in existing_task_cols:
             db.execute(f'ALTER TABLE tasks ADD COLUMN {col} {decl}')
 
@@ -558,6 +559,22 @@ def messages_page():
     return render_template('messages.html', messages=rows)
 
 
+@app.route('/messages/<int:message_id>/delete', methods=['POST'])
+def delete_message(message_id):
+    db = get_db()
+    message = db.execute('SELECT * FROM messages WHERE id = ?', (message_id,)).fetchone()
+    if not message:
+        flash('Message not found.', 'warning')
+        return redirect(url_for('messages_page'))
+    if session.get('role') not in FULL_ACCESS_ROLES and message['author_id'] != session.get('user_id'):
+        flash('You can only delete your own messages.', 'warning')
+        return redirect(url_for('messages_page'))
+    db.execute('DELETE FROM messages WHERE id = ?', (message_id,))
+    db.commit()
+    flash('Message deleted.', 'success')
+    return redirect(url_for('messages_page'))
+
+
 # ---------- document library (prep sheets + IFC per hospital) ----------
 
 @app.route('/documents')
@@ -710,6 +727,14 @@ def _time_ago(iso_str):
     return f'{hours // 24}d ago'
 
 
+URGENCY_LEVELS = {
+    'red': 'Within hours',
+    'yellow': 'Within 24 hours',
+    'green': 'Can wait',
+}
+_URGENCY_ORDER_SQL = "CASE t.urgency WHEN 'red' THEN 0 WHEN 'yellow' THEN 1 WHEN 'green' THEN 2 ELSE 3 END"
+
+
 @app.route('/')
 def queue():
     db = get_db()
@@ -723,7 +748,7 @@ def queue():
         rows = db.execute(
             "SELECT t.*, u.display_name AS claimed_by_name FROM tasks t "
             "LEFT JOIN users u ON u.id = t.claimed_by_id "
-            "WHERE t.pending_question_for = ? ORDER BY t.created_at ASC",
+            f"WHERE t.pending_question_for = ? ORDER BY {_URGENCY_ORDER_SQL}, t.created_at ASC",
             (session['user_id'],),
         ).fetchall()
     elif view == 'mine':
@@ -731,7 +756,7 @@ def queue():
             "SELECT t.*, u.display_name AS claimed_by_name FROM tasks t "
             "LEFT JOIN users u ON u.id = t.claimed_by_id "
             "WHERE t.status = 'claimed' AND t.claimed_by_id = ? "
-            "ORDER BY t.claimed_at ASC",
+            f"ORDER BY {_URGENCY_ORDER_SQL}, t.claimed_at ASC",
             (session['user_id'],),
         ).fetchall()
     else:  # untouched (full-access only)
@@ -739,7 +764,7 @@ def queue():
             "SELECT t.*, u.display_name AS claimed_by_name FROM tasks t "
             "LEFT JOIN users u ON u.id = t.claimed_by_id "
             "WHERE t.status = 'open' "
-            "ORDER BY t.created_at ASC"
+            f"ORDER BY {_URGENCY_ORDER_SQL}, t.created_at ASC"
         ).fetchall()
 
     tasks = []
@@ -789,7 +814,7 @@ def queue():
     return render_template(
         'queue.html', tasks=tasks, sources=sources, handoff_targets=handoff_targets,
         is_delegate=is_delegate, view=view, untouched_count=untouched_count, mine_count=mine_count,
-        questions_count=questions_count, notify_targets=notify_targets,
+        questions_count=questions_count, notify_targets=notify_targets, urgency_levels=URGENCY_LEVELS,
     )
 
 
@@ -809,6 +834,26 @@ def claim_task(task_id):
     )
     db.commit()
     return redirect(url_for('queue', view='mine'))
+
+
+@app.route('/task/<int:task_id>/urgency', methods=['POST'])
+def set_urgency(task_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can set urgency.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    urgency = request.form.get('urgency', '').strip()
+    if not task or task['status'] == 'done':
+        flash('That task is already resolved.', 'warning')
+        return redirect(url_for('queue'))
+    if urgency not in URGENCY_LEVELS:
+        flash('Choose a valid urgency.', 'warning')
+        return redirect(url_for('queue'))
+    db.execute('UPDATE tasks SET urgency = ? WHERE id = ?', (urgency, task_id))
+    db.commit()
+    flash(f'Marked {URGENCY_LEVELS[urgency]}.', 'success')
+    return redirect(url_for('queue'))
 
 
 @app.route('/task/<int:task_id>/handoff', methods=['POST'])
@@ -850,15 +895,27 @@ def handoff_task(task_id):
         flash(error, 'warning')
         return redirect(url_for('queue'))
 
+    urgency = request.form.get('urgency', '').strip()
+    set_urgency_now = user['role'] in FULL_ACCESS_ROLES and urgency in URGENCY_LEVELS
+
     now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
-        "pending_question_for = NULL WHERE id = ?",
-        (target['id'], now, task_id),
-    )
+    if set_urgency_now:
+        db.execute(
+            "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
+            "pending_question_for = NULL, urgency = ? WHERE id = ?",
+            (target['id'], now, urgency, task_id),
+        )
+    else:
+        db.execute(
+            "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
+            "pending_question_for = NULL WHERE id = ?",
+            (target['id'], now, task_id),
+        )
     note = (f"Handed to {target['display_name']} by {user['display_name']}: {instructions}" if instructions
             else f"Handed to {target['display_name']} by {user['display_name']} — "
                  "no specific instructions, just call and find out what's needed.")
+    if set_urgency_now:
+        note += f' [{URGENCY_LEVELS[urgency]}]'
     db.execute(
         'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
         (task_id, user['id'], now, note),
