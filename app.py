@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     author_id INTEGER,
+    recipient_id INTEGER,
     created_at TEXT NOT NULL,
     body TEXT NOT NULL
 );
@@ -293,6 +294,10 @@ def _migrate(db):
     existing_payment_cols = {row['name'] for row in db.execute('PRAGMA table_info(payments)').fetchall()}
     if 'minutes' not in existing_payment_cols:
         db.execute('ALTER TABLE payments ADD COLUMN minutes REAL')
+
+    existing_message_cols = {row['name'] for row in db.execute('PRAGMA table_info(messages)').fetchall()}
+    if 'recipient_id' not in existing_message_cols:
+        db.execute('ALTER TABLE messages ADD COLUMN recipient_id INTEGER')
 
     # task_id used to be required - relax it so clinic/phone time can be logged
     # without being tied to a specific callback task. SQLite can't drop a NOT
@@ -543,20 +548,35 @@ def messages_page():
     db = get_db()
     if request.method == 'POST':
         body = request.form.get('body', '').strip()
+        recipient_id = request.form.get('recipient_id', '').strip() or None
+        if recipient_id and not db.execute(
+            'SELECT 1 FROM users WHERE id = ? AND active = 1', (recipient_id,)
+        ).fetchone():
+            recipient_id = None
         if body:
             db.execute(
-                'INSERT INTO messages (author_id, created_at, body) VALUES (?, ?, ?)',
-                (session['user_id'], datetime.now(timezone.utc).isoformat(), body),
+                'INSERT INTO messages (author_id, recipient_id, created_at, body) VALUES (?, ?, ?, ?)',
+                (session['user_id'], recipient_id, datetime.now(timezone.utc).isoformat(), body),
             )
             db.commit()
-            flash('Message posted.', 'success')
+            flash('Message sent.' if recipient_id else 'Message posted.', 'success')
         return redirect(url_for('messages_page'))
 
+    # Everyone sees public posts; direct messages are only visible to the
+    # sender and the recipient - not a broadcast, so nobody else's DMs show up.
     rows = db.execute(
-        "SELECT m.*, u.display_name AS author_name FROM messages m "
-        "LEFT JOIN users u ON u.id = m.author_id ORDER BY m.created_at DESC LIMIT 200"
+        "SELECT m.*, u.display_name AS author_name, r.display_name AS recipient_name FROM messages m "
+        "LEFT JOIN users u ON u.id = m.author_id "
+        "LEFT JOIN users r ON r.id = m.recipient_id "
+        "WHERE m.recipient_id IS NULL OR m.recipient_id = ? OR m.author_id = ? "
+        "ORDER BY m.created_at DESC LIMIT 200",
+        (session['user_id'], session['user_id']),
     ).fetchall()
-    return render_template('messages.html', messages=rows)
+    recipients = db.execute(
+        "SELECT id, display_name FROM users WHERE active = 1 AND id != ? ORDER BY display_name",
+        (session['user_id'],),
+    ).fetchall()
+    return render_template('messages.html', messages=rows, recipients=recipients)
 
 
 @app.route('/messages/<int:message_id>/delete', methods=['POST'])
@@ -566,7 +586,9 @@ def delete_message(message_id):
     if not message:
         flash('Message not found.', 'warning')
         return redirect(url_for('messages_page'))
-    if session.get('role') not in FULL_ACCESS_ROLES and message['author_id'] != session.get('user_id'):
+    uid = session.get('user_id')
+    if (session.get('role') not in FULL_ACCESS_ROLES
+            and message['author_id'] != uid and message['recipient_id'] != uid):
         flash('You can only delete your own messages.', 'warning')
         return redirect(url_for('messages_page'))
     db.execute('DELETE FROM messages WHERE id = ?', (message_id,))

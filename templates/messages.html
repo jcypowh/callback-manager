@@ -3,11 +3,20 @@
 {% block content %}
 <h3 class="mb-1">Messages</h3>
 <p class="text-muted small mb-3">A shared noticeboard for anything that isn't tied to one specific patient
-task — questions, updates, whatever needs saying. Everyone sees this.</p>
+task — questions, updates, whatever needs saying. Post to everyone, or pick a person to send it just to them.</p>
 
 <form method="post" class="card p-3 mb-3" style="max-width:600px;">
-  <textarea name="body" class="form-control mb-2" rows="3" placeholder="Write a message..." required></textarea>
-  <button class="btn btn-primary align-self-start">Post</button>
+  <div class="mb-2">
+    <label class="form-label small mb-0">To</label>
+    <select name="recipient_id" id="recipient-picker" class="form-select form-select-sm" style="max-width:220px;">
+      <option value="">Everyone</option>
+      {% for r in recipients %}
+      <option value="{{ r.id }}">{{ r.display_name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <textarea name="body" id="message-body" class="form-control mb-2" rows="3" placeholder="Write a message..." required></textarea>
+  <button class="btn btn-primary align-self-start">Send</button>
 </form>
 
 {% if not messages %}
@@ -15,18 +24,42 @@ task — questions, updates, whatever needs saying. Everyone sees this.</p>
 {% else %}
 <div style="max-width:700px;">
   {% for m in messages %}
-  <div class="card p-2 mb-2">
+  <div class="card p-2 mb-2{% if m.recipient_id %} border-info{% endif %}">
     <div class="d-flex justify-content-between align-items-start gap-2">
-      <div class="small text-muted">{{ m.created_at[:16].replace('T', ' ') }} — <strong>{{ m.author_name or 'system' }}</strong></div>
-      {% if current_user.role in ('admin', 'actioneer') or m.author_id == current_user.id %}
-      <form method="post" action="{{ url_for('delete_message', message_id=m.id) }}" onsubmit="return confirm('Delete this message?');">
-        <button class="btn btn-sm btn-outline-danger py-0 px-1" title="Delete">&times;</button>
-      </form>
-      {% endif %}
+      <div class="small text-muted">
+        {{ m.created_at[:16].replace('T', ' ') }} — <strong>{{ m.author_name or 'system' }}</strong>
+        {% if m.recipient_id %}
+        <span class="badge bg-info text-dark">To {{ m.recipient_name or 'someone' }}</span>
+        {% endif %}
+      </div>
+      <div class="d-flex gap-1">
+        {% if m.recipient_id and m.author_id != current_user.id %}
+        <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 reply-btn"
+                data-reply-to="{{ m.author_id }}" title="Reply">Reply</button>
+        {% endif %}
+        {% if current_user.role in ('admin', 'actioneer') or m.author_id == current_user.id or m.recipient_id == current_user.id %}
+        <form method="post" action="{{ url_for('delete_message', message_id=m.id) }}" onsubmit="return confirm('Delete this message?');">
+          <button class="btn btn-sm btn-outline-danger py-0 px-1" title="Delete">&times;</button>
+        </form>
+        {% endif %}
+      </div>
     </div>
     <div style="white-space:pre-wrap;">{{ m.body }}</div>
   </div>
   {% endfor %}
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.reply-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.getElementById('recipient-picker').value = this.dataset.replyTo;
+    var body = document.getElementById('message-body');
+    body.focus();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  });
+});
+</script>
 {% endblock %}
