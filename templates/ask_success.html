@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Request received — Shore Gastroenterology{% endblock %}
+{% block content %}
+<div style="max-width:600px;" class="mx-auto">
+  {% if confirmed %}
+  <h3 class="mb-3"><i class="fa-solid fa-circle-check text-success"></i> Request received</h3>
+  <p>
+    Thanks — your card has been authorised but <strong>not charged yet</strong>. Dr Tu will review
+    your request and you'll be emailed his answer. You're only charged if he answers directly;
+    if he decides you need an appointment instead, you won't be charged at all.
+  </p>
+  {% else %}
+  <h3 class="mb-3"><i class="fa-solid fa-triangle-exclamation text-warning"></i> We couldn't confirm your payment</h3>
+  <p>
+    Something went wrong confirming your payment authorisation. If you completed payment details on
+    the Stripe page, please contact the practice directly to confirm your request went through
+    before assuming it has.
+  </p>
+  {% endif %}
+  <a href="{{ url_for('ask_form') }}" class="btn btn-outline-secondary btn-sm">Back to form</a>
+</div>
+{% endblock %}

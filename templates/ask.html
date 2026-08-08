@@ -1,0 +1,63 @@
+{% extends 'base.html' %}
+{% block title %}Ask Dr Tu a question — Shore Gastroenterology{% endblock %}
+{% block content %}
+<div style="max-width:600px;" class="mx-auto">
+  <h3 class="mb-1"><i class="fa-solid fa-comment-medical"></i> Ask a question or request a script</h3>
+  <p class="text-muted">
+    This service is for existing Shore Gastroenterology patients only — seen at <strong>Mater
+    Hospital</strong> or <strong>Northern Beaches Hospital</strong>. If you haven't been seen by
+    Dr Tu through one of those hospitals, please call the practice instead; we can't accept
+    requests here from new patients or from other clinics.
+  </p>
+  <p class="text-muted small">
+    A card hold of <strong>${{ fee }} AUD</strong> is taken when you submit. You are only actually
+    charged if Dr Tu answers directly. If he decides your situation needs an in-person appointment
+    instead, the hold is released and you are not charged.
+  </p>
+
+  <form method="post" class="card p-3">
+    <div class="mb-3">
+      <label class="form-label">Your name</label>
+      <input type="text" name="patient_name" class="form-control" value="{{ form.patient_name or '' }}" required>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Mobile number</label>
+      <input type="tel" name="patient_mobile" class="form-control" value="{{ form.patient_mobile or '' }}" required>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Email</label>
+      <input type="email" name="patient_email" class="form-control" value="{{ form.patient_email or '' }}" required>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Which hospital did you see Dr Tu at?</label>
+      <select name="clinic_seen" class="form-select" required>
+        <option value="" {% if not form.clinic_seen %}selected{% endif %} disabled>Select one...</option>
+        {% for c in clinics %}
+        <option value="{{ c }}" {% if form.clinic_seen == c %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">What do you need?</label>
+      <select name="request_type" class="form-select" required>
+        <option value="" {% if not form.request_type %}selected{% endif %} disabled>Select one...</option>
+        {% for key, label in types.items() %}
+        <option value="{{ key }}" {% if form.request_type == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Your question or script request</label>
+      <textarea name="question_text" class="form-control" rows="5" required>{{ form.question_text or '' }}</textarea>
+    </div>
+    <div class="form-check mb-3">
+      <input class="form-check-input" type="checkbox" name="consent" id="consent">
+      <label class="form-check-label" for="consent">
+        I understand a ${{ fee }} AUD fee applies if Dr Tu answers, and that I will not be charged
+        if he asks me to book an appointment instead.
+      </label>
+    </div>
+    <button class="btn btn-primary">Continue to payment</button>
+  </form>
+</div>
+{% endblock %}

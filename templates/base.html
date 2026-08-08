@@ -31,6 +31,7 @@
         <li class="nav-item"><a class="nav-link" href="{{ url_for('referral_drop') }}">Referral Drop</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('fax_inbox_page') }}">Fax Inbox {% if unfiled_fax_count %}<span class="badge bg-warning text-dark">{{ unfiled_fax_count }}</span>{% endif %}</a></li>
         <li class="nav-item"><a class="nav-link" href="{{ url_for('fax_archive_page') }}">Faxed Results</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('paid_qa_page') }}">Paid Q&amp;A {% if pending_paid_qa_count %}<span class="badge bg-warning text-dark">{{ pending_paid_qa_count }}</span>{% endif %}</a></li>
         {% endif %}
 
         <li class="nav-item dropdown">

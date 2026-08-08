@@ -126,6 +126,37 @@
   <button class="btn btn-outline-primary">Poll fax inbox now</button>
 </form>
 
+<form method="post" class="card p-3 mb-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="save_stripe">
+  <h5>Paid Q&amp;A / Script Requests (Stripe)</h5>
+  <p class="text-muted small">
+    Existing Shore Gastroenterology patients only (Mater or NBH). Card is authorised when they
+    submit, and only actually charged once you answer — declining releases the hold.
+  </p>
+  <div class="mb-3">
+    <label class="form-label">Fee (AUD)</label>
+    <input type="number" step="0.01" min="0" name="paid_qa_fee_aud" class="form-control" style="max-width:140px;" value="{{ paid_qa_fee_aud }}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Stripe publishable key</label>
+    <input type="text" name="stripe_publishable_key" class="form-control" value="{{ stripe_publishable_key }}" placeholder="pk_test_...">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Stripe secret key</label>
+    <input type="password" name="stripe_secret_key" class="form-control" placeholder="{% if has_stripe_secret_key %}(unchanged){% else %}not set{% endif %}">
+    <div class="form-text">From your Stripe dashboard. Leave blank to keep the current one.</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Stripe webhook signing secret</label>
+    <input type="password" name="stripe_webhook_secret" class="form-control" placeholder="{% if has_stripe_webhook_secret %}(unchanged){% else %}not set{% endif %}">
+    <div class="form-text">
+      From the webhook endpoint you create in Stripe pointing at
+      <code>{{ request.url_root }}ask/webhook</code>. Leave blank to keep the current one.
+    </div>
+  </div>
+  <button class="btn btn-primary">Save Paid Q&amp;A settings</button>
+</form>
+
 <form method="post" class="card p-3 mb-3 d-flex flex-row gap-2 align-items-end" style="max-width:500px;">
   <input type="hidden" name="action" value="send_test_email">
   <div class="flex-grow-1">

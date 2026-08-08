@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block title %}Answer — Paid Q&A{% endblock %}
+{% block content %}
+<div style="max-width:700px;">
+  <h3 class="mb-1">Answer request</h3>
+  <p class="text-muted small mb-3">Sending your answer will charge the patient's card
+  (${{ '%.2f'|format(pq.amount_cents / 100) }}, previously authorised).</p>
+
+  <div class="card p-3 mb-3">
+    <strong>{{ pq.patient_name }}</strong> — {{ pq.clinic_seen }}
+    <span class="badge bg-secondary">{{ types[pq.request_type] }}</span>
+    <div class="small text-muted">{{ pq.patient_mobile }} · {{ pq.patient_email }} · {{ pq.created_at[:16].replace('T', ' ') }}</div>
+    <div class="mt-2" style="white-space:pre-wrap;">{{ pq.question_text }}</div>
+  </div>
+
+  <form method="post" class="card p-3">
+    <div class="mb-3">
+      <label class="form-label">Your answer</label>
+      <textarea name="answer_text" class="form-control" rows="6" required></textarea>
+      <div class="form-text">This will be emailed to the patient exactly as written.</div>
+    </div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-primary">Send answer &amp; charge ${{ '%.2f'|format(pq.amount_cents / 100) }}</button>
+      <a href="{{ url_for('paid_qa_page') }}" class="btn btn-outline-secondary">Back</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

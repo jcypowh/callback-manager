@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block title %}Paid Q&A — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Paid Q&amp;A / Script Requests</h3>
+<p class="text-muted small mb-3">
+  Card is authorised on submission, charged only when you answer. Declining releases the hold and
+  creates a normal callback task instead.
+</p>
+
+{% if not questions %}
+<p class="text-muted">Nothing pending.</p>
+{% else %}
+<div style="max-width:800px;">
+  {% for q in questions %}
+  <div class="card p-3 mb-2">
+    <div class="d-flex justify-content-between align-items-start">
+      <div>
+        <strong>{{ q.patient_name }}</strong> — {{ q.clinic_seen }}
+        <span class="badge bg-secondary">{{ types[q.request_type] }}</span>
+        <div class="small text-muted">
+          {{ q.patient_mobile }} · {{ q.patient_email }} · {{ q.created_at[:16].replace('T', ' ') }}
+          · ${{ '%.2f'|format(q.amount_cents / 100) }} authorised
+        </div>
+      </div>
+      <div class="d-flex gap-1">
+        <a href="{{ url_for('paid_qa_answer', pq_id=q.id) }}" class="btn btn-sm btn-primary">Answer</a>
+        <form method="post" action="{{ url_for('paid_qa_decline', pq_id=q.id) }}" onsubmit="return confirm('Decline and release the hold — patient will not be charged. Continue?');">
+          <button class="btn btn-sm btn-outline-secondary">Decline</button>
+        </form>
+      </div>
+    </div>
+    <div class="mt-2" style="white-space:pre-wrap;">{{ q.question_text }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if history %}
+<h5 class="mt-4">Recent decisions</h5>
+<div style="max-width:800px;">
+  {% for q in history %}
+  <div class="card p-2 mb-2">
+    <div class="small text-muted">
+      {{ q.decided_at[:16].replace('T', ' ') }} — <strong>{{ q.patient_name }}</strong>
+      {% if q.status == 'answered' %}
+      <span class="badge bg-success">Answered &amp; charged</span>
+      {% else %}
+      <span class="badge bg-secondary">Declined — not charged</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

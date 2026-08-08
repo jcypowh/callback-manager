@@ -12,6 +12,7 @@ from datetime import datetime, date, timezone
 from functools import wraps
 
 import requests
+import stripe
 from requests.auth import HTTPBasicAuth
 from flask import (
     Flask, g, render_template, request, redirect, url_for, flash, session, send_file,
@@ -251,6 +252,25 @@ CREATE TABLE IF NOT EXISTS fax_documents (
     filed_at TEXT,
     linked_task_id INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS paid_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    patient_name TEXT NOT NULL,
+    patient_mobile TEXT NOT NULL,
+    patient_email TEXT NOT NULL,
+    clinic_seen TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    question_text TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    stripe_checkout_session_id TEXT,
+    stripe_payment_intent_id TEXT,
+    status TEXT NOT NULL DEFAULT 'awaiting_payment',
+    answer_text TEXT,
+    decided_by_id INTEGER,
+    decided_at TEXT,
+    linked_task_id INTEGER
+);
 """
 
 
@@ -440,7 +460,9 @@ def _log_standalone_time(db, user, minutes, rate, reason, now):
 
 @app.before_request
 def require_login():
-    if request.endpoint is None or request.endpoint in ('login', 'static', 'service_worker'):
+    if request.endpoint is None or request.endpoint in (
+        'login', 'static', 'service_worker', 'ask_form', 'ask_success', 'ask_webhook',
+    ):
         return None
     if not session.get('user_id'):
         return redirect(url_for('login', next=request.path))
@@ -469,6 +491,7 @@ def inject_globals():
     user = current_user()
     all_users = []
     unfiled_fax_count = 0
+    pending_paid_qa_count = 0
     if user:
         all_users = get_db().execute(
             'SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name'
@@ -477,6 +500,9 @@ def inject_globals():
             unfiled_fax_count = get_db().execute(
                 "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL"
             ).fetchone()['n']
+            pending_paid_qa_count = get_db().execute(
+                "SELECT COUNT(*) AS n FROM paid_questions WHERE status = 'pending_review'"
+            ).fetchone()['n']
     return {
         'current_user': user,
         'outcome_labels': OUTCOME_LABELS,
@@ -484,6 +510,7 @@ def inject_globals():
         'endoscopy_manager_url': cfg('endoscopy_manager_url', '') if user else '',
         'practice_manager_url': cfg('practice_manager_url', '') if user else '',
         'unfiled_fax_count': unfiled_fax_count,
+        'pending_paid_qa_count': pending_paid_qa_count,
     }
 
 
@@ -1713,6 +1740,21 @@ def admin_settings():
                 flash(f'Fax poll failed: {error}', 'danger')
             else:
                 flash(f'Fax poll complete: {count} new fax(es) imported.', 'success')
+        elif action == 'save_stripe':
+            fee = request.form.get('paid_qa_fee_aud', '').strip()
+            try:
+                fee_val = round(float(fee), 2) if fee else 25.0
+            except ValueError:
+                fee_val = 25.0
+            set_cfg('paid_qa_fee_aud', str(fee_val))
+            set_cfg('stripe_publishable_key', request.form.get('stripe_publishable_key', '').strip())
+            new_secret_key = request.form.get('stripe_secret_key', '').strip()
+            if new_secret_key:
+                set_cfg('stripe_secret_key', new_secret_key)
+            new_webhook_secret = request.form.get('stripe_webhook_secret', '').strip()
+            if new_webhook_secret:
+                set_cfg('stripe_webhook_secret', new_webhook_secret)
+            flash('Paid Q&A settings saved.', 'success')
         elif action == 'change_shared_password':
             new_password = request.form.get('new_password', '')
             confirm = request.form.get('new_password_confirm', '')
@@ -1773,6 +1815,10 @@ def admin_settings():
         fax_gmail_address=cfg('fax_gmail_address', ''),
         has_fax_password=bool(cfg('fax_gmail_app_password')),
         fax_gmail_folder=cfg('fax_gmail_folder', 'INBOX'),
+        paid_qa_fee_aud=cfg('paid_qa_fee_aud', '25.00'),
+        stripe_publishable_key=cfg('stripe_publishable_key', ''),
+        has_stripe_secret_key=bool(cfg('stripe_secret_key')),
+        has_stripe_webhook_secret=bool(cfg('stripe_webhook_secret')),
     )
 
 
@@ -1993,6 +2039,279 @@ def file_fax(fax_id):
     db.commit()
     flash(f'Filed as {FAX_CATEGORIES[category]}.', 'success')
     return redirect(url_for('fax_inbox_page'))
+
+
+# ---------- paid Q&A / script requests (public-facing, Stripe) ----------
+# Public flow: patient fills /ask -> Stripe Checkout authorises (not charges) their
+# card -> /ask/success confirms -> request sits pending_review for Dr Tu/Sally.
+# Internal flow: /paid-qa/<id>/answer captures the hold (actually charges) once
+# answered; /paid-qa/<id>/decline releases the hold with no charge and creates a
+# normal callback task instead.
+
+PAID_QA_CLINICS = ['Mater Hospital', 'Northern Beaches Hospital']
+PAID_QA_TYPES = {'question': 'Clinical question', 'script': 'Script request'}
+
+
+def _paid_qa_fee_cents():
+    try:
+        return max(50, int(round(float(cfg('paid_qa_fee_aud', '25.00')) * 100)))
+    except ValueError:
+        return 2500
+
+
+@app.route('/ask', methods=['GET', 'POST'])
+def ask_form():
+    fee = cfg('paid_qa_fee_aud', '25.00')
+    if request.method == 'POST':
+        patient_name = request.form.get('patient_name', '').strip()
+        patient_mobile = request.form.get('patient_mobile', '').strip()
+        patient_email = request.form.get('patient_email', '').strip()
+        clinic_seen = request.form.get('clinic_seen', '').strip()
+        request_type = request.form.get('request_type', '').strip()
+        question_text = request.form.get('question_text', '').strip()
+        consent = request.form.get('consent') == 'on'
+
+        errors = []
+        if not patient_name or not patient_mobile or not patient_email:
+            errors.append('Please fill in your name, mobile, and email.')
+        if clinic_seen not in PAID_QA_CLINICS:
+            errors.append('This service is only for existing Shore Gastroenterology patients seen '
+                           'at Mater Hospital or Northern Beaches Hospital.')
+        if request_type not in PAID_QA_TYPES:
+            errors.append('Choose whether this is a question or a script request.')
+        if not question_text:
+            errors.append('Please enter your question or script request.')
+        if not consent:
+            errors.append('You need to agree to the fee before continuing.')
+        if not cfg('stripe_secret_key'):
+            errors.append('This service is not available right now — please call the practice instead.')
+
+        if errors:
+            for e in errors:
+                flash(e, 'danger')
+            return render_template('ask.html', fee=fee, clinics=PAID_QA_CLINICS, types=PAID_QA_TYPES, form=request.form)
+
+        db = get_db()
+        now = datetime.now(timezone.utc).isoformat()
+        amount_cents = _paid_qa_fee_cents()
+        cur = db.execute(
+            'INSERT INTO paid_questions (created_at, patient_name, patient_mobile, patient_email, '
+            'clinic_seen, request_type, question_text, amount_cents, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (now, patient_name, patient_mobile, patient_email, clinic_seen, request_type,
+             question_text, amount_cents, 'awaiting_payment'),
+        )
+        pq_id = cur.lastrowid
+        db.commit()
+
+        stripe.api_key = cfg('stripe_secret_key')
+        try:
+            checkout_session = stripe.checkout.Session.create(
+                mode='payment',
+                payment_method_types=['card'],
+                line_items=[{
+                    'price_data': {
+                        'currency': 'aud',
+                        'product_data': {'name': f'Shore Gastroenterology — {PAID_QA_TYPES[request_type]}'},
+                        'unit_amount': amount_cents,
+                    },
+                    'quantity': 1,
+                }],
+                payment_intent_data={'capture_method': 'manual'},
+                customer_email=patient_email,
+                success_url=url_for('ask_success', _external=True) + '?session_id={CHECKOUT_SESSION_ID}',
+                cancel_url=url_for('ask_form', _external=True),
+                metadata={'paid_question_id': str(pq_id)},
+            )
+        except Exception as e:
+            logger.exception('Stripe checkout session creation failed')
+            flash(f'Could not start payment: {e}', 'danger')
+            return render_template('ask.html', fee=fee, clinics=PAID_QA_CLINICS, types=PAID_QA_TYPES, form=request.form)
+
+        db.execute(
+            'UPDATE paid_questions SET stripe_checkout_session_id = ? WHERE id = ?',
+            (checkout_session.id, pq_id),
+        )
+        db.commit()
+        return redirect(checkout_session.url, code=303)
+
+    return render_template('ask.html', fee=fee, clinics=PAID_QA_CLINICS, types=PAID_QA_TYPES, form={})
+
+
+def _confirm_paid_question_payment(checkout_session_id):
+    """Looks up the Stripe session; if the card was successfully authorised
+    (payment_intent status requires_capture), marks the matching paid_questions
+    row pending_review. Idempotent — safe to call from both the success redirect
+    and the webhook."""
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM paid_questions WHERE stripe_checkout_session_id = ?', (checkout_session_id,)
+    ).fetchone()
+    if not row or row['status'] != 'awaiting_payment':
+        return row
+    stripe.api_key = cfg('stripe_secret_key')
+    checkout_session = stripe.checkout.Session.retrieve(checkout_session_id, expand=['payment_intent'])
+    payment_intent = checkout_session.payment_intent
+    if payment_intent and payment_intent.status == 'requires_capture':
+        db.execute(
+            "UPDATE paid_questions SET status = 'pending_review', stripe_payment_intent_id = ? WHERE id = ?",
+            (payment_intent.id, row['id']),
+        )
+        db.commit()
+    return db.execute('SELECT * FROM paid_questions WHERE id = ?', (row['id'],)).fetchone()
+
+
+@app.route('/ask/success')
+def ask_success():
+    checkout_session_id = request.args.get('session_id', '')
+    row = None
+    if checkout_session_id:
+        try:
+            row = _confirm_paid_question_payment(checkout_session_id)
+        except Exception:
+            logger.exception('Could not confirm paid question payment')
+    return render_template('ask_success.html', confirmed=bool(row and row['status'] == 'pending_review'))
+
+
+@app.route('/ask/webhook', methods=['POST'])
+def ask_webhook():
+    webhook_secret = cfg('stripe_webhook_secret')
+    if not webhook_secret:
+        # No signing secret configured yet — the /ask/success redirect is the
+        # primary confirmation path, so just no-op rather than trust an
+        # unverified payload.
+        return ('', 200)
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature', '')
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except Exception:
+        logger.exception('Stripe webhook signature verification failed')
+        return ('', 400)
+
+    if event['type'] == 'checkout.session.completed':
+        checkout_session_id = event['data']['object']['id']
+        try:
+            _confirm_paid_question_payment(checkout_session_id)
+        except Exception:
+            logger.exception('Could not confirm paid question payment from webhook')
+    return ('', 200)
+
+
+@app.route('/paid-qa')
+def paid_qa_page():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can access Paid Q&A.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    pending = db.execute(
+        "SELECT * FROM paid_questions WHERE status = 'pending_review' ORDER BY created_at ASC"
+    ).fetchall()
+    history = db.execute(
+        "SELECT * FROM paid_questions WHERE status IN ('answered', 'declined') "
+        "ORDER BY decided_at DESC LIMIT 30"
+    ).fetchall()
+    return render_template('paid_qa.html', questions=pending, history=history, types=PAID_QA_TYPES)
+
+
+@app.route('/paid-qa/<int:pq_id>/answer', methods=['GET', 'POST'])
+def paid_qa_answer(pq_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can answer Paid Q&A.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    pq = db.execute('SELECT * FROM paid_questions WHERE id = ?', (pq_id,)).fetchone()
+    if not pq or pq['status'] != 'pending_review':
+        flash('That request is not awaiting an answer.', 'warning')
+        return redirect(url_for('paid_qa_page'))
+
+    if request.method == 'POST':
+        answer_text = request.form.get('answer_text', '').strip()
+        if not answer_text:
+            flash('Write an answer before sending.', 'danger')
+            return render_template('paid_qa_answer.html', pq=pq, types=PAID_QA_TYPES)
+
+        stripe.api_key = cfg('stripe_secret_key')
+        try:
+            stripe.PaymentIntent.capture(pq['stripe_payment_intent_id'])
+        except Exception as e:
+            logger.exception('Stripe capture failed')
+            flash(f'Could not charge the patient: {e}', 'danger')
+            return render_template('paid_qa_answer.html', pq=pq, types=PAID_QA_TYPES)
+
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "UPDATE paid_questions SET status = 'answered', answer_text = ?, decided_by_id = ?, "
+            "decided_at = ? WHERE id = ?",
+            (answer_text, session['user_id'], now, pq_id),
+        )
+        db.commit()
+
+        email_error = _send_email(
+            pq['patient_email'],
+            'Your question to Shore Gastroenterology',
+            f"Hi {pq['patient_name']},\n\nThanks for your question:\n\n\"{pq['question_text']}\"\n\n"
+            f"Dr Tu's answer:\n\n{answer_text}\n\nThis was charged at "
+            f"${pq['amount_cents'] / 100:.2f} as agreed when you submitted your request.",
+        )
+        if email_error:
+            flash(f'Charged and saved, but the email to the patient failed: {email_error}', 'warning')
+        else:
+            flash('Answer sent and payment captured.', 'success')
+        return redirect(url_for('paid_qa_page'))
+
+    return render_template('paid_qa_answer.html', pq=pq, types=PAID_QA_TYPES)
+
+
+@app.route('/paid-qa/<int:pq_id>/decline', methods=['POST'])
+def paid_qa_decline(pq_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can decline Paid Q&A.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    pq = db.execute('SELECT * FROM paid_questions WHERE id = ?', (pq_id,)).fetchone()
+    if not pq or pq['status'] != 'pending_review':
+        flash('That request is not awaiting a decision.', 'warning')
+        return redirect(url_for('paid_qa_page'))
+
+    reason = request.form.get('reason', '').strip()
+    stripe.api_key = cfg('stripe_secret_key')
+    try:
+        stripe.PaymentIntent.cancel(pq['stripe_payment_intent_id'])
+    except Exception as e:
+        logger.exception('Stripe cancel failed')
+        flash(f'Could not release the hold: {e}', 'danger')
+        return redirect(url_for('paid_qa_page'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    message = f"Paid Q&A referred to appointment (not charged). Original request: {pq['question_text']}"
+    if reason:
+        message += f'\n\nReason given: {reason}'
+    cur = db.execute(
+        'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, status) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (now, pq['patient_name'], pq['patient_mobile'], message, 'Paid Q&A — needs appointment', 'open'),
+    )
+    linked_task_id = cur.lastrowid
+
+    db.execute(
+        "UPDATE paid_questions SET status = 'declined', decided_by_id = ?, decided_at = ?, "
+        "linked_task_id = ? WHERE id = ?",
+        (session['user_id'], now, linked_task_id, pq_id),
+    )
+    db.commit()
+
+    email_error = _send_email(
+        pq['patient_email'],
+        'Your question to Shore Gastroenterology',
+        f"Hi {pq['patient_name']},\n\nDr Tu has reviewed your question and believes it's best "
+        "addressed with an appointment rather than by message. You have not been charged for "
+        "this request. Our team will be in touch to help arrange a booking.",
+    )
+    if email_error:
+        flash(f'Released the hold, but the email to the patient failed: {email_error}', 'warning')
+    else:
+        flash('Declined — not charged, patient notified, and a booking task was created.', 'success')
+    return redirect(url_for('paid_qa_page'))
 
 
 # ---------- Gmail polling ----------
