@@ -17,8 +17,31 @@
       <div class="small text-muted">
         {{ f.received_at[:16].replace('T', ' ') }} · from {{ f.from_number or 'unknown number' }}
       </div>
-      <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>
+      <div class="d-flex gap-1">
+        <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>
+        {% if has_ai_key %}
+        <form method="post" action="{{ url_for('analyze_fax', fax_id=f.id) }}">
+          <button class="btn btn-sm btn-outline-dark">
+            <i class="fa-solid fa-robot"></i> {% if f.ai_analyzed_at %}Re-analyse{% else %}AI Analyse{% endif %}
+          </button>
+        </form>
+        {% endif %}
+      </div>
     </div>
+
+    {% if f.ai_analyzed_at %}
+    <div class="alert alert-secondary py-2 px-3 mb-2 small ai-suggestion"
+         data-category="{{ f.ai_category or '' }}" data-patient-name="{{ f.ai_patient_name or '' }}"
+         data-action="{{ f.ai_suggested_action or '' }}">
+      <strong><i class="fa-solid fa-robot"></i> AI suggestion:</strong>
+      {% if f.ai_category %}{{ categories.get(f.ai_category, f.ai_category) }}{% else %}Not sure{% endif %}
+      {% if f.ai_patient_name %} — {{ f.ai_patient_name }}{% endif %}
+      {% if f.ai_suggested_action %} — <span class="fw-bold">{{ action_labels.get(f.ai_suggested_action, f.ai_suggested_action) }}</span>{% endif %}
+      {% if f.ai_reasoning %}<div class="text-muted fst-italic">{{ f.ai_reasoning }}</div>{% endif %}
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-1 use-ai-suggestion">Use this</button>
+    </div>
+    {% endif %}
+
     <form method="post" action="{{ url_for('file_fax', fax_id=f.id) }}" class="row g-2 align-items-end">
       <div class="col-auto">
         <label class="form-label small mb-0">File as</label>
@@ -67,6 +90,34 @@ document.querySelectorAll('.fax-category-select').forEach(function (select) {
     var referralFields = this.closest('form').querySelectorAll('.referral-only');
     var show = this.value === 'referral';
     referralFields.forEach(function (el) { el.style.display = show ? '' : 'none'; });
+  });
+});
+
+var actionNotes = {
+  scope: 'AI suggestion: book scope directly.',
+  consult: 'AI suggestion: suggest consult first.'
+};
+document.querySelectorAll('.use-ai-suggestion').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var box = this.closest('.ai-suggestion');
+    var form = box.nextElementSibling;
+    var category = box.dataset.category;
+    var patientName = box.dataset.patientName;
+    var action = box.dataset.action;
+    if (category) {
+      var select = form.querySelector('.fax-category-select');
+      select.value = category;
+      select.dispatchEvent(new Event('change'));
+    }
+    if (patientName) {
+      form.querySelector('input[name="patient_name"]').value = patientName;
+    }
+    if (action && actionNotes[action]) {
+      var notesInput = form.querySelector('input[name="notes"]');
+      if (!notesInput.value) {
+        notesInput.value = actionNotes[action];
+      }
+    }
   });
 });
 </script>

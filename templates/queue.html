@@ -176,11 +176,20 @@
       </div>
 
     {% else %}
-      <div class="mb-2 text-center">
+      <div class="mb-2 text-center d-flex justify-content-center align-items-center gap-2">
         <a href="{{ url_for('resolve_task', task_id=t.id) }}" class="btn btn-success btn-lg px-4"
            title="Fully done - records an outcome and archives it">
           <i class="fa-solid fa-circle-check"></i> Resolve
         </a>
+        {% if not is_delegate %}
+        <form method="post" action="{{ url_for('quick_archive_task', task_id=t.id) }}"
+              onsubmit="return confirm('Archive this task with no outcome note?');">
+          <button type="submit" class="btn btn-outline-success"
+                  title="Skip the outcome-note form and archive straight away">
+            <i class="fa-solid fa-box-archive"></i> Quick archive
+          </button>
+        </form>
+        {% endif %}
       </div>
       <div class="d-flex flex-wrap gap-2">
 

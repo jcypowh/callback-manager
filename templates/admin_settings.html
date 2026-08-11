@@ -157,6 +157,22 @@
   <button class="btn btn-primary">Save Paid Q&amp;A settings</button>
 </form>
 
+<form method="post" class="card p-3 mb-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="save_ai">
+  <h5>AI Fax Analysis (Claude)</h5>
+  <p class="text-muted small">
+    Lets the fax inbox suggest a filing category, patient name, and — for referrals — whether it
+    reads as scope-appropriate or needs a consult first. Always a suggestion for staff to check,
+    never files anything automatically.
+  </p>
+  <div class="mb-3">
+    <label class="form-label">Anthropic API key</label>
+    <input type="password" name="anthropic_api_key" class="form-control" placeholder="{% if has_anthropic_key %}(unchanged){% else %}not set{% endif %}">
+    <div class="form-text">From console.anthropic.com. Leave blank to keep the current one.</div>
+  </div>
+  <button class="btn btn-primary">Save AI settings</button>
+</form>
+
 <form method="post" class="card p-3 mb-3 d-flex flex-row gap-2 align-items-end" style="max-width:500px;">
   <input type="hidden" name="action" value="send_test_email">
   <div class="flex-grow-1">

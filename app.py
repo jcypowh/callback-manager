@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import base64
 import sqlite3
 import logging
 import smtplib
@@ -13,6 +15,7 @@ from functools import wraps
 
 import requests
 import stripe
+import anthropic
 from requests.auth import HTTPBasicAuth
 from flask import (
     Flask, g, render_template, request, redirect, url_for, flash, session, send_file,
@@ -250,7 +253,12 @@ CREATE TABLE IF NOT EXISTS fax_documents (
     notes TEXT,
     filed_by_id INTEGER,
     filed_at TEXT,
-    linked_task_id INTEGER
+    linked_task_id INTEGER,
+    ai_category TEXT,
+    ai_patient_name TEXT,
+    ai_suggested_action TEXT,
+    ai_reasoning TEXT,
+    ai_analyzed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paid_questions (
@@ -318,6 +326,13 @@ def _migrate(db):
     existing_message_cols = {row['name'] for row in db.execute('PRAGMA table_info(messages)').fetchall()}
     if 'recipient_id' not in existing_message_cols:
         db.execute('ALTER TABLE messages ADD COLUMN recipient_id INTEGER')
+
+    existing_fax_cols = {row['name'] for row in db.execute('PRAGMA table_info(fax_documents)').fetchall()}
+    for col, decl in [('ai_category', 'TEXT'), ('ai_patient_name', 'TEXT'),
+                       ('ai_suggested_action', 'TEXT'), ('ai_reasoning', 'TEXT'),
+                       ('ai_analyzed_at', 'TEXT')]:
+        if col not in existing_fax_cols:
+            db.execute(f'ALTER TABLE fax_documents ADD COLUMN {col} {decl}')
 
     # task_id used to be required - relax it so clinic/phone time can be logged
     # without being tied to a specific callback task. SQLite can't drop a NOT
@@ -1035,8 +1050,9 @@ def confirm_appointment(task_id):
     default_message = f"Welcome to Shore Gastroenterology. Your appointment is confirmed on {appointment_when}."
     if reply_email:
         default_message += (
-            f' Please reply by email to {reply_email} with your name, DOB, referral '
-            '(as a photo or PDF), and email address.'
+            f' Please reply by email to {reply_email} with your name, DOB, and email address, '
+            'and send your referral (PDF or screenshot photo) to the same address so we can '
+            'also send you our clinic information.'
         )
 
     if request.method == 'POST':
@@ -1209,6 +1225,31 @@ def resolve_task(task_id):
         return redirect(url_for('queue'))
 
     return render_template('resolve.html', task=task, notes=notes)
+
+
+@app.route('/task/<int:task_id>/quick-archive', methods=['POST'])
+def quick_archive_task(task_id):
+    """One-click archive for Dr Tu/Sally - skips the outcome-note form for
+    tasks that don't need one on record. Not available to delegates."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can quick-archive.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or task['status'] == 'done':
+        flash('That task is already resolved.', 'warning')
+        return redirect(url_for('queue'))
+    user = current_user()
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        "UPDATE tasks SET status = 'done', outcome_type = 'completed', outcome_note = ?, "
+        "actioned_by_id = ?, actioned_at = ?, pending_question_for = NULL, "
+        "claimed_by_id = COALESCE(claimed_by_id, ?) WHERE id = ?",
+        ('Quick-archived from the queue.', user['id'], now, user['id'], task_id),
+    )
+    db.commit()
+    flash('Task archived.', 'success')
+    return redirect(url_for('queue'))
 
 
 @app.route('/task/<int:task_id>/sms', methods=['GET', 'POST'])
@@ -1755,6 +1796,11 @@ def admin_settings():
             if new_webhook_secret:
                 set_cfg('stripe_webhook_secret', new_webhook_secret)
             flash('Paid Q&A settings saved.', 'success')
+        elif action == 'save_ai':
+            new_ai_key = request.form.get('anthropic_api_key', '').strip()
+            if new_ai_key:
+                set_cfg('anthropic_api_key', new_ai_key)
+            flash('AI fax analysis settings saved.', 'success')
         elif action == 'change_shared_password':
             new_password = request.form.get('new_password', '')
             confirm = request.form.get('new_password_confirm', '')
@@ -1819,6 +1865,7 @@ def admin_settings():
         stripe_publishable_key=cfg('stripe_publishable_key', ''),
         has_stripe_secret_key=bool(cfg('stripe_secret_key')),
         has_stripe_webhook_secret=bool(cfg('stripe_webhook_secret')),
+        has_anthropic_key=bool(cfg('anthropic_api_key')),
     )
 
 
@@ -1940,6 +1987,98 @@ FAX_CATEGORIES = {
     'referral': 'Referral',
 }
 
+FAX_AI_ACTION_LABELS = {
+    'scope': 'Book scope directly',
+    'consult': 'Suggest consult',
+}
+
+
+def _analyze_fax_with_ai(pdf_bytes):
+    """Asks Claude to read the fax and suggest a filing category and patient
+    name, and - for referrals - whether the letter reads as scope-appropriate
+    (explicit endoscopy/colonoscopy/gastroscopy request, screening/surveillance/
+    FOBT, or a symptom commonly booked straight to a procedure such as PR
+    bleeding, dysphagia, or dyspepsia) or should go to a consult first
+    (functional complaints like SIBO/IBS, a second-opinion request, or
+    anything unclear). This is a suggestion for staff to act on, not an
+    automatic booking."""
+    api_key = cfg('anthropic_api_key')
+    if not api_key:
+        raise RuntimeError('Anthropic API key is not set - configure it under Settings first.')
+    client = anthropic.Anthropic(api_key=api_key)
+    pdf_b64 = base64.b64encode(pdf_bytes).decode('ascii')
+    prompt = (
+        'You are triaging an incoming fax for a gastroenterology practice (Dr Jeffrey Tu). '
+        'Read the document and respond with ONLY a JSON object, no other text, with these keys:\n'
+        '"category": one of "pathology", "radiology", "referral", or "other" if you truly cannot tell\n'
+        '"patient_name": the patient\'s full name as written, or null if not found\n'
+        '"suggested_action": only relevant if category is "referral" - one of "scope" or "consult", '
+        'else null.\n'
+        '  Use "scope" if the referring GP explicitly requests endoscopy, colonoscopy, or gastroscopy, '
+        'OR the letter is about screening, surveillance, or a positive FOBT, OR the presenting symptom '
+        'is one commonly booked straight to a procedure (e.g. PR bleeding, dysphagia, dyspepsia).\n'
+        '  Use "consult" if it is a functional complaint (e.g. SIBO, IBS), a request for a second '
+        'opinion, or you are not confident a direct procedure booking is appropriate.\n'
+        '"reasoning": one short sentence explaining the category/action choice'
+    )
+    response = client.messages.create(
+        model='claude-sonnet-5',
+        max_tokens=500,
+        messages=[{
+            'role': 'user',
+            'content': [
+                {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': pdf_b64}},
+                {'type': 'text', 'text': prompt},
+            ],
+        }],
+    )
+    text = ''.join(block.text for block in response.content if block.type == 'text')
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match:
+        raise RuntimeError('Could not parse the AI response.')
+    data = json.loads(match.group(0))
+    category = data.get('category') if data.get('category') in FAX_CATEGORIES else None
+    suggested_action = data.get('suggested_action') if data.get('suggested_action') in FAX_AI_ACTION_LABELS else None
+    return {
+        'category': category,
+        'patient_name': (data.get('patient_name') or '').strip() or None,
+        'suggested_action': suggested_action,
+        'reasoning': (data.get('reasoning') or '').strip() or None,
+    }
+
+
+@app.route('/fax-inbox/<int:fax_id>/analyze', methods=['POST'])
+def analyze_fax(fax_id):
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can analyse faxes.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    fax = db.execute('SELECT * FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+    if not fax:
+        flash('Fax not found.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    pdf_path = FAX_DIR / fax['pdf_filename']
+    if not pdf_path.exists():
+        flash('Fax file is missing.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+
+    try:
+        result = _analyze_fax_with_ai(pdf_path.read_bytes())
+    except Exception as e:
+        logger.exception('AI fax analysis failed')
+        flash(f'AI analysis failed: {e}', 'danger')
+        return redirect(url_for('fax_inbox_page'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        'UPDATE fax_documents SET ai_category = ?, ai_patient_name = ?, ai_suggested_action = ?, '
+        'ai_reasoning = ?, ai_analyzed_at = ? WHERE id = ?',
+        (result['category'], result['patient_name'], result['suggested_action'], result['reasoning'], now, fax_id),
+    )
+    db.commit()
+    flash('AI analysis complete.', 'success')
+    return redirect(url_for('fax_inbox_page'))
+
 
 @app.route('/fax-inbox')
 def fax_inbox_page():
@@ -1953,7 +2092,8 @@ def fax_inbox_page():
     targets = db.execute(
         "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
     ).fetchall()
-    return render_template('fax_inbox.html', faxes=unfiled, categories=FAX_CATEGORIES, targets=targets)
+    return render_template('fax_inbox.html', faxes=unfiled, categories=FAX_CATEGORIES, targets=targets,
+                            action_labels=FAX_AI_ACTION_LABELS, has_ai_key=bool(cfg('anthropic_api_key')))
 
 
 @app.route('/fax-inbox/archive')
