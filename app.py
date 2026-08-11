@@ -1050,8 +1050,8 @@ def confirm_appointment(task_id):
     default_message = f"Welcome to Shore Gastroenterology. Your appointment is confirmed on {appointment_when}."
     if reply_email:
         default_message += (
-            f' Please reply by email to {reply_email} with your name, DOB, and email address, '
-            'and send your referral (PDF or screenshot photo) to the same address so we can '
+            f' Please reply by email to {reply_email} with your name, DOB, and email address.'
+            f' Please send your referral (PDF or screenshot photo) to {reply_email} so we can '
             'also send you our clinic information.'
         )
 
