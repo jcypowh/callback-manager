@@ -19,9 +19,14 @@
                    style="width:110px;" value="{{ row.user.hourly_rate if row.user.hourly_rate is not none else '' }}">
           </div>
           <div class="col-auto">
-            <label class="form-label small mb-0">Clinic rate ($/hr)</label>
+            <label class="form-label small mb-0">Off-office rate ($/hr)</label>
             <input type="number" step="0.01" min="0" name="clinic_hourly_rate" class="form-control form-control-sm"
                    style="width:110px;" value="{{ row.user.clinic_hourly_rate if row.user.clinic_hourly_rate is not none else '' }}">
+          </div>
+          <div class="col-auto">
+            <label class="form-label small mb-0">Office rate ($/hr)</label>
+            <input type="number" step="0.01" min="0" name="office_hourly_rate" class="form-control form-control-sm"
+                   style="width:110px;" value="{{ row.user.office_hourly_rate if row.user.office_hourly_rate is not none else '' }}">
           </div>
           <div class="col-auto">
             <button class="btn btn-sm btn-outline-secondary">Save rates</button>
@@ -50,7 +55,8 @@
               <tr>
                 <td class="text-nowrap small text-muted">{{ e.created_at[:16].replace('T', ' ') }}</td>
                 <td class="small">
-                  {% if e.reason == 'clinic_time' %}Clinic time
+                  {% if e.reason == 'clinic_time' %}Off-office support hours
+                  {% elif e.reason == 'office_time' %}Office hours
                   {% elif e.reason == 'phone_time' %}Phone time
                   {% elif e.task_id %}Task work
                   {% else %}{{ e.reason }}{% endif %}

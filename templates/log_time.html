@@ -25,8 +25,19 @@
   {% if user.clinic_hourly_rate %}
   <form method="post" class="card p-3" style="max-width:280px;">
     <input type="hidden" name="kind" value="clinic">
-    <h5 class="mb-1">Clinic time</h5>
+    <h5 class="mb-1">Off-office support hours</h5>
     <p class="text-muted small mb-2">${{ '%.2f'|format(user.clinic_hourly_rate) }}/hr</p>
+    <label class="form-label">Minutes</label>
+    <input type="number" step="0.01" min="0" name="minutes" class="form-control mb-2" placeholder="e.g. 276 for 4h 36m" required>
+    <button class="btn btn-primary">Log</button>
+  </form>
+  {% endif %}
+
+  {% if user.office_hourly_rate %}
+  <form method="post" class="card p-3" style="max-width:280px;">
+    <input type="hidden" name="kind" value="office">
+    <h5 class="mb-1">Office hours</h5>
+    <p class="text-muted small mb-2">${{ '%.2f'|format(user.office_hourly_rate) }}/hr</p>
     <label class="form-label">Minutes</label>
     <input type="number" step="0.01" min="0" name="minutes" class="form-control mb-2" placeholder="e.g. 276 for 4h 36m" required>
     <button class="btn btn-primary">Log</button>
@@ -45,7 +56,8 @@
     <tr>
       <td class="text-nowrap small text-muted">{{ p.created_at[:16].replace('T', ' ') }}</td>
       <td>
-        {% if p.reason == 'clinic_time' %}Clinic time
+        {% if p.reason == 'clinic_time' %}Off-office support hours
+        {% elif p.reason == 'office_time' %}Office hours
         {% elif p.reason == 'phone_time' %}Telephone task time
         {% elif p.task_id %}Task work
         {% else %}{{ p.reason }}{% endif %}

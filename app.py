@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS users (
     token_rate REAL,
     hourly_rate REAL,
     clinic_hourly_rate REAL,
+    office_hourly_rate REAL,
     phone_number TEXT,
     is_doctor INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1
@@ -316,6 +317,8 @@ def _migrate(db):
         db.execute('ALTER TABLE users ADD COLUMN hourly_rate REAL')
     if 'clinic_hourly_rate' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN clinic_hourly_rate REAL')
+    if 'office_hourly_rate' not in existing_user_cols:
+        db.execute('ALTER TABLE users ADD COLUMN office_hourly_rate REAL')
     if 'phone_number' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN phone_number TEXT')
 
@@ -368,6 +371,7 @@ def _migrate(db):
     # if he doesn't have one yet (old per-task fields are no longer used).
     db.execute("UPDATE users SET hourly_rate = 30.0 WHERE display_name = 'Warren' AND hourly_rate IS NULL")
     db.execute("UPDATE users SET clinic_hourly_rate = 33.0 WHERE display_name = 'Warren' AND clinic_hourly_rate IS NULL")
+    db.execute("UPDATE users SET office_hourly_rate = 40.0 WHERE display_name = 'Warren' AND office_hourly_rate IS NULL")
     # Sally and Dr Tu should have the same interface - both full admins.
     db.execute("UPDATE users SET role = 'admin' WHERE display_name = 'Sally' AND role = 'actioneer'")
     # 'Forward to Dr Tu' needs to know which admin is actually the doctor.
@@ -385,15 +389,15 @@ def init_db():
     existing = db.execute('SELECT COUNT(*) AS n FROM users').fetchone()['n']
     if existing == 0:
         seed = [
-            ('Dr Jeffrey Tu', 'admin', None, None, 1),
-            ('Sally', 'admin', None, None, 0),
-            ('Warren', 'delegate', 30.0, 33.0, 0),
+            ('Dr Jeffrey Tu', 'admin', None, None, None, 1),
+            ('Sally', 'admin', None, None, None, 0),
+            ('Warren', 'delegate', 30.0, 33.0, 40.0, 0),
         ]
-        for display_name, role, hourly_rate, clinic_hourly_rate, is_doctor in seed:
+        for display_name, role, hourly_rate, clinic_hourly_rate, office_hourly_rate, is_doctor in seed:
             db.execute(
-                'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, is_doctor) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (display_name, role, hourly_rate, clinic_hourly_rate, is_doctor),
+                'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, office_hourly_rate, is_doctor) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (display_name, role, hourly_rate, clinic_hourly_rate, office_hourly_rate, is_doctor),
             )
         db.commit()
     db.close()
@@ -1511,7 +1515,7 @@ def archive():
 @app.route('/log-time', methods=['GET', 'POST'])
 def log_time_page():
     user = current_user()
-    if not user['hourly_rate'] and not user['clinic_hourly_rate']:
+    if not user['hourly_rate'] and not user['clinic_hourly_rate'] and not user['office_hourly_rate']:
         flash("You're not set up for hourly pay, so there's nothing to log here.", 'warning')
         return redirect(url_for('queue'))
     db = get_db()
@@ -1535,7 +1539,11 @@ def log_time_page():
         elif kind == 'clinic' and user['clinic_hourly_rate']:
             _log_standalone_time(db, user, minutes, user['clinic_hourly_rate'], 'clinic_time', now)
             db.commit()
-            flash(f'Logged {minutes:g} min of clinic time.', 'success')
+            flash(f'Logged {minutes:g} min of off-office support hours.', 'success')
+        elif kind == 'office' and user['office_hourly_rate']:
+            _log_standalone_time(db, user, minutes, user['office_hourly_rate'], 'office_time', now)
+            db.commit()
+            flash(f'Logged {minutes:g} min of office hours.', 'success')
         else:
             flash('Could not log that.', 'danger')
         return redirect(url_for('log_time_page'))
@@ -1623,11 +1631,13 @@ def payroll():
             user_id = request.form.get('user_id')
             hourly_rate = request.form.get('hourly_rate', '').strip()
             clinic_hourly_rate = request.form.get('clinic_hourly_rate', '').strip()
+            office_hourly_rate = request.form.get('office_hourly_rate', '').strip()
             hourly_rate_val = float(hourly_rate) if hourly_rate else None
             clinic_hourly_rate_val = float(clinic_hourly_rate) if clinic_hourly_rate else None
+            office_hourly_rate_val = float(office_hourly_rate) if office_hourly_rate else None
             db.execute(
-                'UPDATE users SET hourly_rate = ?, clinic_hourly_rate = ? WHERE id = ?',
-                (hourly_rate_val, clinic_hourly_rate_val, user_id),
+                'UPDATE users SET hourly_rate = ?, clinic_hourly_rate = ?, office_hourly_rate = ? WHERE id = ?',
+                (hourly_rate_val, clinic_hourly_rate_val, office_hourly_rate_val, user_id),
             )
             db.commit()
             flash('Rates updated.', 'success')
@@ -1635,7 +1645,8 @@ def payroll():
         return redirect(url_for('payroll'))
 
     payees = db.execute(
-        "SELECT * FROM users WHERE (hourly_rate IS NOT NULL OR clinic_hourly_rate IS NOT NULL) AND active = 1"
+        "SELECT * FROM users WHERE (hourly_rate IS NOT NULL OR clinic_hourly_rate IS NOT NULL "
+        "OR office_hourly_rate IS NOT NULL) AND active = 1"
     ).fetchall()
     totals = []
     for u in payees:
@@ -1675,14 +1686,16 @@ def admin_users():
             rate_val = float(rate) if rate else None
             clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
             clinic_rate_val = float(clinic_rate) if clinic_rate else None
+            office_rate = request.form.get('office_hourly_rate', '').strip()
+            office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
             if not display_name:
                 flash('Display name is required.', 'danger')
             else:
                 db.execute(
-                    'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, phone_number) '
-                    'VALUES (?, ?, ?, ?, ?)',
-                    (display_name, role, rate_val, clinic_rate_val, phone or None),
+                    'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, '
+                    'office_hourly_rate, phone_number) VALUES (?, ?, ?, ?, ?, ?)',
+                    (display_name, role, rate_val, clinic_rate_val, office_rate_val, phone or None),
                 )
                 db.commit()
                 flash(f'Added {display_name}.', 'success')
@@ -1693,15 +1706,17 @@ def admin_users():
             rate_val = float(rate) if rate else None
             clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
             clinic_rate_val = float(clinic_rate) if clinic_rate else None
+            office_rate = request.form.get('office_hourly_rate', '').strip()
+            office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
             active = 1 if request.form.get('active') == 'on' else 0
             is_doctor = 1 if request.form.get('is_doctor') == 'on' else 0
             if is_doctor:
                 db.execute('UPDATE users SET is_doctor = 0 WHERE id != ?', (user_id,))
             db.execute(
-                'UPDATE users SET role = ?, hourly_rate = ?, clinic_hourly_rate = ?, phone_number = ?, '
-                'active = ?, is_doctor = ? WHERE id = ?',
-                (role, rate_val, clinic_rate_val, phone or None, active, is_doctor, user_id),
+                'UPDATE users SET role = ?, hourly_rate = ?, clinic_hourly_rate = ?, office_hourly_rate = ?, '
+                'phone_number = ?, active = ?, is_doctor = ? WHERE id = ?',
+                (role, rate_val, clinic_rate_val, office_rate_val, phone or None, active, is_doctor, user_id),
             )
             db.commit()
             flash('User updated.', 'success')
