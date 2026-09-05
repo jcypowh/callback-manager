@@ -26,6 +26,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import gmail_poller
 import fax_poller
+import referral_email_poller
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get('STORAGE_DIR', BASE_DIR)) / 'data'
@@ -259,7 +260,10 @@ CREATE TABLE IF NOT EXISTS fax_documents (
     ai_patient_name TEXT,
     ai_suggested_action TEXT,
     ai_reasoning TEXT,
-    ai_analyzed_at TEXT
+    ai_analyzed_at TEXT,
+    source TEXT NOT NULL DEFAULT 'fax',
+    from_address TEXT,
+    subject TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paid_questions (
@@ -333,9 +337,11 @@ def _migrate(db):
     existing_fax_cols = {row['name'] for row in db.execute('PRAGMA table_info(fax_documents)').fetchall()}
     for col, decl in [('ai_category', 'TEXT'), ('ai_patient_name', 'TEXT'),
                        ('ai_suggested_action', 'TEXT'), ('ai_reasoning', 'TEXT'),
-                       ('ai_analyzed_at', 'TEXT')]:
+                       ('ai_analyzed_at', 'TEXT'), ('from_address', 'TEXT'), ('subject', 'TEXT')]:
         if col not in existing_fax_cols:
             db.execute(f'ALTER TABLE fax_documents ADD COLUMN {col} {decl}')
+    if 'source' not in existing_fax_cols:
+        db.execute("ALTER TABLE fax_documents ADD COLUMN source TEXT NOT NULL DEFAULT 'fax'")
 
     # task_id used to be required - relax it so clinic/phone time can be logged
     # without being tied to a specific callback task. SQLite can't drop a NOT
@@ -1796,6 +1802,12 @@ def admin_settings():
                 flash(f'Fax poll failed: {error}', 'danger')
             else:
                 flash(f'Fax poll complete: {count} new fax(es) imported.', 'success')
+        elif action == 'poll_referral_now':
+            count, error = poll_referral_emails()
+            if error:
+                flash(f'Referral email poll failed: {error}', 'danger')
+            else:
+                flash(f'Referral email poll complete: {count} new document(s) imported.', 'success')
         elif action == 'save_stripe':
             fee = request.form.get('paid_qa_fee_aud', '').strip()
             try:
@@ -2170,13 +2182,17 @@ def file_fax(fax_id):
         phone_number = request.form.get('phone_number', '').strip()
         assign_to = request.form.get('assign_to', '').strip()
         claimed_by_id = int(assign_to) if assign_to else None
-        message = f'Referral from fax (received from {fax["from_number"] or "unknown number"}).'
+        if fax['source'] == 'email':
+            message = f'Referral from email (received from {fax["from_address"] or "unknown sender"}).'
+        else:
+            message = f'Referral from fax (received from {fax["from_number"] or "unknown number"}).'
         if notes:
             message += f' {notes}'
         cur = db.execute(
             'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, '
             'status, claimed_by_id, claimed_at, attachment_filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (now, patient_name or None, phone_number or None, message, 'Fax referral',
+            (now, patient_name or None, phone_number or None, message,
+             'Email referral' if fax['source'] == 'email' else 'Fax referral',
              'claimed' if claimed_by_id else 'open', claimed_by_id, now if claimed_by_id else None,
              fax['pdf_filename']),
         )
@@ -2582,6 +2598,59 @@ def poll_fax_inbox():
         db.close()
 
 
+def poll_referral_emails():
+    """Fetch referral letters arriving as a PDF attachment (not an actual fax)
+    to the same fax mailbox, and save them as unfiled documents alongside
+    faxes. Returns (count_imported, error_or_None). Reuses the fax mailbox's
+    existing address/app-password - never writes to those config keys."""
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    try:
+        fax_address = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_address'").fetchone()
+        fax_password = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_app_password'").fetchone()
+        fax_folder = db.execute("SELECT value FROM config WHERE key = 'fax_gmail_folder'").fetchone()
+        fax_address = fax_address['value'] if fax_address else None
+        fax_password = fax_password['value'] if fax_password else None
+        fax_folder = fax_folder['value'] if fax_folder else 'INBOX'
+        if not fax_address or not fax_password:
+            return 0, 'Fax inbox is not set up yet — configure it under Settings first.'
+
+        existing_ids = {
+            row['gmail_message_id']
+            for row in db.execute(
+                'SELECT gmail_message_id FROM fax_documents WHERE gmail_message_id IS NOT NULL'
+            ).fetchall()
+        }
+        try:
+            new_emails = referral_email_poller.fetch_new_referral_emails(
+                fax_address, fax_password, existing_ids, folder=fax_folder
+            )
+        except Exception as e:
+            logger.exception('Referral email poll failed')
+            return 0, str(e)
+
+        count = 0
+        for item in new_emails:
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                cur = db.execute(
+                    'INSERT INTO fax_documents (received_at, pdf_filename, gmail_message_id, source, '
+                    'from_address, subject) VALUES (?, ?, ?, ?, ?, ?)',
+                    (now, '', item['message_id'], 'email', item['from_address'], item['subject']),
+                )
+            except sqlite3.IntegrityError:
+                continue
+            fax_id = cur.lastrowid
+            filename = f'{fax_id}.pdf'
+            (FAX_DIR / filename).write_bytes(item['pdf_bytes'])
+            db.execute('UPDATE fax_documents SET pdf_filename = ? WHERE id = ?', (filename, fax_id))
+            count += 1
+        db.commit()
+        return count, None
+    finally:
+        db.close()
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
     db = sqlite3.connect(str(DB_PATH))
@@ -2590,6 +2659,7 @@ def start_scheduler():
     interval = int(row[0]) if row and row[0] else 90
     scheduler.add_job(poll_gmail, 'interval', seconds=interval, id='gmail_poll', replace_existing=True)
     scheduler.add_job(poll_fax_inbox, 'interval', seconds=interval, id='fax_poll', replace_existing=True)
+    scheduler.add_job(poll_referral_emails, 'interval', seconds=interval, id='referral_email_poll', replace_existing=True)
     scheduler.start()
     return scheduler
 

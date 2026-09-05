@@ -3,8 +3,10 @@
 {% block content %}
 <h3 class="mb-1">Fax Inbox</h3>
 <p class="text-muted small mb-3">
-  Preview each fax and file it — Pathology/Radiology go into a searchable
+  Preview each document and file it — Pathology/Radiology go into a searchable
   <a href="{{ url_for('fax_archive_page') }}">archive</a>, Referral creates a task like any other.
+  Includes actual faxes and referral letters that arrived as a plain PDF email attachment,
+  so nothing gets lost in either inbox.
 </p>
 
 {% if not faxes %}
@@ -15,7 +17,14 @@
   <div class="card-body">
     <div class="d-flex justify-content-between flex-wrap gap-2 mb-2">
       <div class="small text-muted">
+        {% if f.source == 'email' %}
+        <span class="badge bg-info text-dark">📧 Email</span>
+        {{ f.received_at[:16].replace('T', ' ') }} · from {{ f.from_address or 'unknown sender' }}
+        {% if f.subject %}· "{{ f.subject }}"{% endif %}
+        {% else %}
+        <span class="badge bg-secondary">📠 Fax</span>
         {{ f.received_at[:16].replace('T', ' ') }} · from {{ f.from_number or 'unknown number' }}
+        {% endif %}
       </div>
       <div class="d-flex gap-1">
         <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>

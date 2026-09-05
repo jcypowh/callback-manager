@@ -15,13 +15,14 @@
 <p class="text-muted">{{ 'No matches.' if q else 'Nothing filed yet.' }}</p>
 {% else %}
 <table class="table table-sm bg-white align-middle">
-  <thead><tr><th>Filed</th><th>Patient</th><th>Category</th><th>Notes</th><th></th></tr></thead>
+  <thead><tr><th>Filed</th><th>Patient</th><th>Category</th><th>Source</th><th>Notes</th><th></th></tr></thead>
   <tbody>
     {% for f in faxes %}
     <tr>
       <td class="text-nowrap small text-muted">{{ f.filed_at[:16].replace('T', ' ') if f.filed_at else '' }}</td>
       <td>{{ f.patient_name or '—' }}</td>
       <td>{{ categories.get(f.category, f.category) }}</td>
+      <td class="small">{{ 'Email' if f.source == 'email' else 'Fax' }}</td>
       <td class="small">{{ f.notes or '' }}</td>
       <td><a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a></td>
     </tr>

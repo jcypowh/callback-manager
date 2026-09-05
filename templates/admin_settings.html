@@ -103,6 +103,9 @@
   <p class="text-muted small">
     A separate Gmail account that receives fax-to-email notifications from
     do_not_reply@au.voipcloud.online. Kept separate from the Solium/Halaxy inbox above.
+    This same account is also scanned for referral letters arriving as a plain PDF
+    attachment (not an actual fax) — anything else in the inbox with a PDF attached lands
+    in the same Fax Inbox for filing, so a referral never gets missed.
   </p>
   <div class="mb-3">
     <label class="form-label">Gmail address</label>
@@ -121,10 +124,16 @@
   <button class="btn btn-primary">Save fax settings</button>
 </form>
 
-<form method="post" class="mb-3">
-  <input type="hidden" name="action" value="poll_fax_now">
-  <button class="btn btn-outline-primary">Poll fax inbox now</button>
-</form>
+<div class="d-flex gap-2 mb-3">
+  <form method="post">
+    <input type="hidden" name="action" value="poll_fax_now">
+    <button class="btn btn-outline-primary">Poll fax inbox now</button>
+  </form>
+  <form method="post">
+    <input type="hidden" name="action" value="poll_referral_now">
+    <button class="btn btn-outline-primary">Poll referral emails now</button>
+  </form>
+</div>
 
 <form method="post" class="card p-3 mb-3" style="max-width:500px;">
   <input type="hidden" name="action" value="save_stripe">
