@@ -2038,7 +2038,9 @@ def _analyze_fax_with_ai(pdf_bytes):
         'You are triaging an incoming fax for a gastroenterology practice (Dr Jeffrey Tu). '
         'Read the document and respond with ONLY a JSON object, no other text, with these keys:\n'
         '"category": one of "pathology", "radiology", "referral", or "other" if you truly cannot tell\n'
-        '"patient_name": the patient\'s full name as written, or null if not found\n'
+        '"patient_name": the PATIENT\'s full name (not the referring GP, specialist, or letterhead '
+        'owner) - check the whole document (salutation, "Re:" line, date-of-birth line, footer) '
+        'before giving up. Only use null if it truly does not appear anywhere.\n'
         '"suggested_action": only relevant if category is "referral" - one of "scope" or "consult", '
         'else null.\n'
         '  Use "scope" if the referring GP explicitly requests endoscopy, colonoscopy, or gastroscopy, '
@@ -2263,14 +2265,18 @@ def ai_file_fax(fax_id):
         flash("AI couldn't confidently tell what this one is — file it manually below.", 'warning')
         return redirect(url_for('fax_inbox_page'))
 
+    if not result['patient_name']:
+        db.commit()
+        flash(f"AI thinks this is {FAX_CATEGORIES[result['category']]} but couldn't find a patient "
+              "name on it — file it manually below so it's never filed under \"no name\".", 'warning')
+        return redirect(url_for('fax_inbox_page'))
+
     notes = FAX_AI_ACTION_LABELS.get(result['suggested_action'], '') if result['category'] == 'referral' else ''
     _file_fax_document(
-        db, fax, result['category'], result['patient_name'] or '', '', notes, None, session['user_id'],
+        db, fax, result['category'], result['patient_name'], '', notes, None, session['user_id'],
     )
     db.commit()
-    label = FAX_CATEGORIES[result['category']]
-    name_part = f' — {result["patient_name"]}' if result['patient_name'] else ' (no patient name found — check it)'
-    flash(f'AI filed as {label}{name_part}.', 'success')
+    flash(f"AI filed as {FAX_CATEGORIES[result['category']]} — {result['patient_name']}.", 'success')
     return redirect(url_for('fax_inbox_page'))
 
 
