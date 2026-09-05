@@ -2116,11 +2116,15 @@ def fax_inbox_page():
     unfiled = db.execute(
         "SELECT * FROM fax_documents WHERE category IS NULL ORDER BY received_at ASC"
     ).fetchall()
+    recently_filed = db.execute(
+        "SELECT * FROM fax_documents WHERE filed_at IS NOT NULL ORDER BY filed_at DESC LIMIT 20"
+    ).fetchall()
     targets = db.execute(
         "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
     ).fetchall()
     return render_template('fax_inbox.html', faxes=unfiled, categories=FAX_CATEGORIES, targets=targets,
-                            action_labels=FAX_AI_ACTION_LABELS, has_ai_key=bool(cfg('anthropic_api_key')))
+                            action_labels=FAX_AI_ACTION_LABELS, has_ai_key=bool(cfg('anthropic_api_key')),
+                            recently_filed=recently_filed)
 
 
 @app.route('/fax-inbox/archive')
@@ -2157,6 +2161,42 @@ def view_fax(fax_id):
     return send_file(str(path), mimetype='application/pdf')
 
 
+def _file_fax_document(db, fax, category, patient_name, phone_number, notes, assign_to_id, filed_by_id):
+    """Shared by manual filing (file_fax) and AI auto-filing (ai_file_fax).
+    category must already be validated against FAX_CATEGORIES. Returns the
+    linked_task_id (or None)."""
+    now = datetime.now(timezone.utc).isoformat()
+    linked_task_id = None
+
+    if category == 'referral':
+        if fax['source'] == 'email':
+            message = f'Referral from email (received from {fax["from_address"] or "unknown sender"}).'
+        else:
+            message = f'Referral from fax (received from {fax["from_number"] or "unknown number"}).'
+        if notes:
+            message += f' {notes}'
+        cur = db.execute(
+            'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, '
+            'status, claimed_by_id, claimed_at, attachment_filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (now, patient_name or None, phone_number or None, message,
+             'Email referral' if fax['source'] == 'email' else 'Fax referral',
+             'claimed' if assign_to_id else 'open', assign_to_id, now if assign_to_id else None,
+             fax['pdf_filename']),
+        )
+        linked_task_id = cur.lastrowid
+        # The task views its attachment via REFERRAL_DIR, so copy the PDF there under the new task's id.
+        task_filename = f'{linked_task_id}.pdf'
+        (REFERRAL_DIR / task_filename).write_bytes((FAX_DIR / fax['pdf_filename']).read_bytes())
+        db.execute('UPDATE tasks SET attachment_filename = ? WHERE id = ?', (task_filename, linked_task_id))
+
+    db.execute(
+        'UPDATE fax_documents SET category = ?, patient_name = ?, notes = ?, filed_by_id = ?, '
+        'filed_at = ?, linked_task_id = ? WHERE id = ?',
+        (category, patient_name or None, notes or None, filed_by_id, now, linked_task_id, fax['id']),
+    )
+    return linked_task_id
+
+
 @app.route('/fax-inbox/<int:fax_id>/file', methods=['POST'])
 def file_fax(fax_id):
     if session.get('role') not in FULL_ACCESS_ROLES:
@@ -2175,40 +2215,62 @@ def file_fax(fax_id):
         flash('Choose a category.', 'danger')
         return redirect(url_for('fax_inbox_page'))
 
-    now = datetime.now(timezone.utc).isoformat()
-    linked_task_id = None
+    phone_number = request.form.get('phone_number', '').strip()
+    assign_to = request.form.get('assign_to', '').strip()
+    assign_to_id = int(assign_to) if assign_to else None
 
-    if category == 'referral':
-        phone_number = request.form.get('phone_number', '').strip()
-        assign_to = request.form.get('assign_to', '').strip()
-        claimed_by_id = int(assign_to) if assign_to else None
-        if fax['source'] == 'email':
-            message = f'Referral from email (received from {fax["from_address"] or "unknown sender"}).'
-        else:
-            message = f'Referral from fax (received from {fax["from_number"] or "unknown number"}).'
-        if notes:
-            message += f' {notes}'
-        cur = db.execute(
-            'INSERT INTO tasks (created_at, patient_name, phone_number, message_text, source_label, '
-            'status, claimed_by_id, claimed_at, attachment_filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (now, patient_name or None, phone_number or None, message,
-             'Email referral' if fax['source'] == 'email' else 'Fax referral',
-             'claimed' if claimed_by_id else 'open', claimed_by_id, now if claimed_by_id else None,
-             fax['pdf_filename']),
-        )
-        linked_task_id = cur.lastrowid
-        # The task views its attachment via REFERRAL_DIR, so copy the PDF there under the new task's id.
-        task_filename = f'{linked_task_id}.pdf'
-        (REFERRAL_DIR / task_filename).write_bytes((FAX_DIR / fax['pdf_filename']).read_bytes())
-        db.execute('UPDATE tasks SET attachment_filename = ? WHERE id = ?', (task_filename, linked_task_id))
-
-    db.execute(
-        'UPDATE fax_documents SET category = ?, patient_name = ?, notes = ?, filed_by_id = ?, '
-        'filed_at = ?, linked_task_id = ? WHERE id = ?',
-        (category, patient_name or None, notes or None, session['user_id'], now, linked_task_id, fax_id),
-    )
+    _file_fax_document(db, fax, category, patient_name, phone_number, notes, assign_to_id, session['user_id'])
     db.commit()
     flash(f'Filed as {FAX_CATEGORIES[category]}.', 'success')
+    return redirect(url_for('fax_inbox_page'))
+
+
+@app.route('/fax-inbox/<int:fax_id>/ai-file', methods=['POST'])
+def ai_file_fax(fax_id):
+    """AI reads the document and files it immediately - pathology/radiology
+    under that category with the patient name it found, referral straight
+    into a callback task, PDF saved either way. If it can't confidently tell
+    what the document is, nothing is filed and it's left for manual review."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can use AI filing.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    db = get_db()
+    fax = db.execute('SELECT * FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+    if not fax:
+        flash('Fax not found.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    pdf_path = FAX_DIR / fax['pdf_filename']
+    if not pdf_path.exists():
+        flash('Fax file is missing.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+
+    try:
+        result = _analyze_fax_with_ai(pdf_path.read_bytes())
+    except Exception as e:
+        logger.exception('AI auto-file failed')
+        flash(f'AI could not read this one: {e}', 'danger')
+        return redirect(url_for('fax_inbox_page'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        'UPDATE fax_documents SET ai_category = ?, ai_patient_name = ?, ai_suggested_action = ?, '
+        'ai_reasoning = ?, ai_analyzed_at = ? WHERE id = ?',
+        (result['category'], result['patient_name'], result['suggested_action'], result['reasoning'], now, fax_id),
+    )
+
+    if not result['category']:
+        db.commit()
+        flash("AI couldn't confidently tell what this one is — file it manually below.", 'warning')
+        return redirect(url_for('fax_inbox_page'))
+
+    notes = FAX_AI_ACTION_LABELS.get(result['suggested_action'], '') if result['category'] == 'referral' else ''
+    _file_fax_document(
+        db, fax, result['category'], result['patient_name'] or '', '', notes, None, session['user_id'],
+    )
+    db.commit()
+    label = FAX_CATEGORIES[result['category']]
+    name_part = f' — {result["patient_name"]}' if result['patient_name'] else ' (no patient name found — check it)'
+    flash(f'AI filed as {label}{name_part}.', 'success')
     return redirect(url_for('fax_inbox_page'))
 
 

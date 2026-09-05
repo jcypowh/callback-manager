@@ -9,6 +9,26 @@
   so nothing gets lost in either inbox.
 </p>
 
+{% if recently_filed %}
+<div class="card p-3 mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h6 class="mb-0">Recently filed</h6>
+    <button type="button" id="open-all-pdfs" class="btn btn-sm btn-outline-primary">Open all PDFs</button>
+  </div>
+  <ul class="list-unstyled mb-0 small">
+    {% for f in recently_filed %}
+    <li class="mb-1">
+      <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="recently-filed-pdf-link">
+        {{ f.patient_name or '(no name found)' }}
+      </a>
+      — {{ categories.get(f.category, f.category) }}
+      <span class="text-muted">{{ f.filed_at[:16].replace('T', ' ') if f.filed_at else '' }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 {% if not faxes %}
 <p class="text-muted">Nothing unfiled right now.</p>
 {% else %}
@@ -32,6 +52,12 @@
         <form method="post" action="{{ url_for('analyze_fax', fax_id=f.id) }}">
           <button class="btn btn-sm btn-outline-dark">
             <i class="fa-solid fa-robot"></i> {% if f.ai_analyzed_at %}Re-analyse{% else %}AI Analyse{% endif %}
+          </button>
+        </form>
+        <form method="post" action="{{ url_for('ai_file_fax', fax_id=f.id) }}"
+              onsubmit="return confirm('Let AI read this and file it straight away (pathology/radiology filed under the name it finds, referral sent to Warren\'s queue)?');">
+          <button class="btn btn-sm btn-dark" title="AI reads it and files it immediately - no review step">
+            <i class="fa-solid fa-bolt"></i> AI Action
           </button>
         </form>
         {% endif %}
@@ -94,6 +120,16 @@
 
 {% block scripts %}
 <script>
+var openAllBtn = document.getElementById('open-all-pdfs');
+if (openAllBtn) {
+  openAllBtn.addEventListener('click', function () {
+    var links = document.querySelectorAll('.recently-filed-pdf-link');
+    links.forEach(function (link, i) {
+      setTimeout(function () { window.open(link.href, '_blank'); }, i * 300);
+    });
+  });
+}
+
 document.querySelectorAll('.fax-category-select').forEach(function (select) {
   select.addEventListener('change', function () {
     var referralFields = this.closest('form').querySelectorAll('.referral-only');
