@@ -102,10 +102,19 @@
     {% endif %}
     <div class="mt-2" style="white-space:pre-wrap;">{{ t.message_text }}</div>
     {% if t.attachment_filename %}
-    <div class="mt-1">
+    <div class="mt-1 d-flex align-items-center gap-2">
       <a href="{{ url_for('view_referral_attachment', task_id=t.id) }}" target="_blank" class="btn btn-sm btn-outline-secondary">
         📎 Attachment
       </a>
+      {% if t.referral_filed %}
+      <span class="badge bg-success">Referral filed</span>
+      {% else %}
+      <form method="post" action="{{ url_for('file_task_referral', task_id=t.id) }}">
+        <button class="btn btn-sm btn-outline-primary" title="Files this referral into the central Document Archive">
+          File Referral
+        </button>
+      </form>
+      {% endif %}
     </div>
     {% endif %}
 

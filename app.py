@@ -841,10 +841,22 @@ def queue():
             f"ORDER BY {_URGENCY_ORDER_SQL}, t.created_at ASC"
         ).fetchall()
 
+    attachment_task_ids = [r['id'] for r in rows if r['attachment_filename']]
+    filed_task_ids = set()
+    if attachment_task_ids:
+        placeholders = ','.join('?' * len(attachment_task_ids))
+        filed_task_ids = {
+            row['linked_task_id'] for row in db.execute(
+                f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders})',
+                attachment_task_ids,
+            ).fetchall()
+        }
+
     tasks = []
     for r in rows:
         task = dict(r)
         task['claimed_ago'] = _time_ago(r['claimed_at'])
+        task['referral_filed'] = r['id'] in filed_task_ids
         notes = db.execute(
             "SELECT tn.*, u.display_name AS author_name FROM task_notes tn "
             "LEFT JOIN users u ON u.id = tn.author_id "
@@ -1102,6 +1114,49 @@ def unclaim_task(task_id):
              f"Released back to the open queue by {session.get('display_name')}."),
         )
         db.commit()
+    return redirect(url_for('queue'))
+
+
+@app.route('/task/<int:task_id>/file-referral', methods=['POST'])
+def file_task_referral(task_id):
+    """Files this task's attached referral into the central Document Archive
+    (same place as fax/email referrals) so it's never lost - available to
+    whoever handled the task, not just full-access users. Doesn't create a
+    new task; linked_task_id just points back to this one."""
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task:
+        flash('Task not found.', 'warning')
+        return redirect(url_for('queue'))
+    if not _can_manage_task(task):
+        flash('That task is not assigned to you.', 'warning')
+        return redirect(url_for('queue'))
+    if not task['attachment_filename']:
+        flash('This task has no referral document attached to file.', 'warning')
+        return redirect(url_for('queue'))
+    already = db.execute(
+        'SELECT id FROM fax_documents WHERE linked_task_id = ?', (task_id,)
+    ).fetchone()
+    if already:
+        flash('This referral has already been filed.', 'warning')
+        return redirect(url_for('queue'))
+    attachment_path = REFERRAL_DIR / task['attachment_filename']
+    if not attachment_path.exists():
+        flash('The attached file is missing.', 'warning')
+        return redirect(url_for('queue'))
+
+    now = datetime.now(timezone.utc).isoformat()
+    cur = db.execute(
+        'INSERT INTO fax_documents (received_at, pdf_filename, category, patient_name, filed_by_id, '
+        'filed_at, linked_task_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (task['created_at'], '', 'referral', task['patient_name'], session['user_id'], now, task_id, 'task'),
+    )
+    fax_id = cur.lastrowid
+    filename = f'{fax_id}.pdf'
+    (FAX_DIR / filename).write_bytes(attachment_path.read_bytes())
+    db.execute('UPDATE fax_documents SET pdf_filename = ? WHERE id = ?', (filename, fax_id))
+    db.commit()
+    flash('Referral filed in the Document Archive.', 'success')
     return redirect(url_for('queue'))
 
 
@@ -2012,6 +2067,7 @@ FAX_CATEGORIES = {
     'pathology': 'Pathology',
     'radiology': 'Radiology',
     'referral': 'Referral',
+    'correspondence': 'Correspondence Letter',
 }
 
 FAX_AI_ACTION_LABELS = {
@@ -2037,7 +2093,15 @@ def _analyze_fax_with_ai(pdf_bytes):
     prompt = (
         'You are triaging an incoming fax for a gastroenterology practice (Dr Jeffrey Tu). '
         'Read the document and respond with ONLY a JSON object, no other text, with these keys:\n'
-        '"category": one of "pathology", "radiology", "referral", or "other" if you truly cannot tell\n'
+        '"category": one of "pathology", "radiology", "referral", "correspondence", or "other" if you '
+        'truly cannot tell.\n'
+        '  Use "referral" ONLY when the letter is actually asking Dr Tu to see/treat/book the patient '
+        '(a new referral, a request for an appointment, procedure, or opinion).\n'
+        '  Use "correspondence" for anything else that is just FYI / does not require booking anything - '
+        'e.g. a copy of a letter to another doctor, a discharge summary, a specialist-to-specialist '
+        'update, results already covered elsewhere, or a "for your information" letter. When in doubt '
+        'between referral and correspondence, ask: does this letter need a new appointment booked as a '
+        'direct result of reading it? If no, it is correspondence, not a referral.\n'
         '"patient_name": the PATIENT\'s full name (not the referring GP, specialist, or letterhead '
         'owner) - check the whole document (salutation, "Re:" line, date-of-birth line, footer) '
         'before giving up. Only use null if it truly does not appear anywhere.\n'
@@ -2126,7 +2190,7 @@ def fax_inbox_page():
     ).fetchall()
     return render_template('fax_inbox.html', faxes=unfiled, categories=FAX_CATEGORIES, targets=targets,
                             action_labels=FAX_AI_ACTION_LABELS, has_ai_key=bool(cfg('anthropic_api_key')),
-                            recently_filed=recently_filed)
+                            recently_filed=recently_filed, ai_batch_size=AI_BATCH_SIZE)
 
 
 @app.route('/fax-inbox/archive')
@@ -2136,14 +2200,18 @@ def fax_archive_page():
         return redirect(url_for('queue'))
     db = get_db()
     q = request.args.get('q', '').strip()
-    query = "SELECT * FROM fax_documents WHERE category IN ('pathology', 'radiology')"
+    cat = request.args.get('cat', '').strip()
+    query = "SELECT * FROM fax_documents WHERE category IS NOT NULL"
     params = []
+    if cat in FAX_CATEGORIES:
+        query += " AND category = ?"
+        params.append(cat)
     if q:
         query += " AND patient_name LIKE ?"
         params.append(f'%{q}%')
     query += " ORDER BY filed_at DESC LIMIT 200"
     filed = db.execute(query, params).fetchall()
-    return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q)
+    return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q, cat=cat)
 
 
 @app.route('/fax-inbox/<int:fax_id>/view')
@@ -2227,12 +2295,49 @@ def file_fax(fax_id):
     return redirect(url_for('fax_inbox_page'))
 
 
+AI_BATCH_SIZE = 8
+
+
+def _ai_analyze_and_file_one(db, fax, filed_by_id):
+    """Runs AI analysis on one unfiled fax_documents row and files it if
+    possible - pathology/radiology/correspondence under that category with
+    the patient name found, referral straight into a callback task. Does NOT
+    commit - callers commit once per request (single item or a whole batch).
+    Returns {'filed': bool, 'category': str|None, 'patient_name': str|None,
+    'reason': str|None} - reason is set when filed is False, one of
+    'file missing', 'api error', 'category unclear', 'no patient name found'."""
+    pdf_path = FAX_DIR / fax['pdf_filename']
+    if not pdf_path.exists():
+        return {'filed': False, 'category': None, 'patient_name': None, 'reason': 'file missing'}
+
+    try:
+        result = _analyze_fax_with_ai(pdf_path.read_bytes())
+    except Exception as e:
+        logger.exception('AI auto-file failed for fax %s', fax['id'])
+        return {'filed': False, 'category': None, 'patient_name': None, 'reason': str(e)}
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        'UPDATE fax_documents SET ai_category = ?, ai_patient_name = ?, ai_suggested_action = ?, '
+        'ai_reasoning = ?, ai_analyzed_at = ? WHERE id = ?',
+        (result['category'], result['patient_name'], result['suggested_action'], result['reasoning'], now, fax['id']),
+    )
+
+    if not result['category']:
+        return {'filed': False, 'category': None, 'patient_name': None, 'reason': 'category unclear'}
+    if not result['patient_name']:
+        return {'filed': False, 'category': result['category'], 'patient_name': None, 'reason': 'no patient name found'}
+
+    notes = FAX_AI_ACTION_LABELS.get(result['suggested_action'], '') if result['category'] == 'referral' else ''
+    _file_fax_document(db, fax, result['category'], result['patient_name'], '', notes, None, filed_by_id)
+    return {'filed': True, 'category': result['category'], 'patient_name': result['patient_name'], 'reason': None}
+
+
 @app.route('/fax-inbox/<int:fax_id>/ai-file', methods=['POST'])
 def ai_file_fax(fax_id):
-    """AI reads the document and files it immediately - pathology/radiology
-    under that category with the patient name it found, referral straight
-    into a callback task, PDF saved either way. If it can't confidently tell
-    what the document is, nothing is filed and it's left for manual review."""
+    """AI reads the document and files it immediately. If it can't
+    confidently tell what the document is, or can't find a patient name,
+    nothing is filed and it's left for manual review."""
     if session.get('role') not in FULL_ACCESS_ROLES:
         flash('Only Dr Tu or Sally can use AI filing.', 'warning')
         return redirect(url_for('fax_inbox_page'))
@@ -2241,42 +2346,56 @@ def ai_file_fax(fax_id):
     if not fax:
         flash('Fax not found.', 'warning')
         return redirect(url_for('fax_inbox_page'))
-    pdf_path = FAX_DIR / fax['pdf_filename']
-    if not pdf_path.exists():
-        flash('Fax file is missing.', 'warning')
-        return redirect(url_for('fax_inbox_page'))
 
-    try:
-        result = _analyze_fax_with_ai(pdf_path.read_bytes())
-    except Exception as e:
-        logger.exception('AI auto-file failed')
-        flash(f'AI could not read this one: {e}', 'danger')
-        return redirect(url_for('fax_inbox_page'))
-
-    now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        'UPDATE fax_documents SET ai_category = ?, ai_patient_name = ?, ai_suggested_action = ?, '
-        'ai_reasoning = ?, ai_analyzed_at = ? WHERE id = ?',
-        (result['category'], result['patient_name'], result['suggested_action'], result['reasoning'], now, fax_id),
-    )
-
-    if not result['category']:
-        db.commit()
-        flash("AI couldn't confidently tell what this one is — file it manually below.", 'warning')
-        return redirect(url_for('fax_inbox_page'))
-
-    if not result['patient_name']:
-        db.commit()
-        flash(f"AI thinks this is {FAX_CATEGORIES[result['category']]} but couldn't find a patient "
-              "name on it — file it manually below so it's never filed under \"no name\".", 'warning')
-        return redirect(url_for('fax_inbox_page'))
-
-    notes = FAX_AI_ACTION_LABELS.get(result['suggested_action'], '') if result['category'] == 'referral' else ''
-    _file_fax_document(
-        db, fax, result['category'], result['patient_name'], '', notes, None, session['user_id'],
-    )
+    outcome = _ai_analyze_and_file_one(db, fax, session['user_id'])
     db.commit()
-    flash(f"AI filed as {FAX_CATEGORIES[result['category']]} — {result['patient_name']}.", 'success')
+
+    if outcome['filed']:
+        flash(f"AI filed as {FAX_CATEGORIES[outcome['category']]} — {outcome['patient_name']}.", 'success')
+    elif outcome['reason'] == 'file missing':
+        flash('Fax file is missing.', 'warning')
+    elif outcome['reason'] == 'category unclear':
+        flash("AI couldn't confidently tell what this one is — file it manually below.", 'warning')
+    elif outcome['reason'] == 'no patient name found':
+        flash(f"AI thinks this is {FAX_CATEGORIES[outcome['category']]} but couldn't find a patient "
+              "name on it — file it manually below so it's never filed under \"no name\".", 'warning')
+    else:
+        flash(f"AI could not read this one: {outcome['reason']}", 'danger')
+    return redirect(url_for('fax_inbox_page'))
+
+
+@app.route('/fax-inbox/ai-file-all', methods=['POST'])
+def ai_file_all_fax():
+    """Runs AI Action on the next batch of unfiled documents in one click,
+    for when there's a big backlog - filing what it can and leaving the rest
+    for manual review, same rules as the single-item AI Action."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can use AI filing.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    if not cfg('anthropic_api_key'):
+        flash('Set up the Anthropic API key under Settings first.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    db = get_db()
+    batch = db.execute(
+        "SELECT * FROM fax_documents WHERE category IS NULL ORDER BY received_at ASC LIMIT ?",
+        (AI_BATCH_SIZE,),
+    ).fetchall()
+    if not batch:
+        flash('Nothing unfiled to run AI on.', 'success')
+        return redirect(url_for('fax_inbox_page'))
+
+    filed = 0
+    for fax in batch:
+        outcome = _ai_analyze_and_file_one(db, fax, session['user_id'])
+        if outcome['filed']:
+            filed += 1
+    db.commit()
+
+    remaining = db.execute("SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL").fetchone()['n']
+    msg = f'AI ran on {len(batch)}: {filed} filed, {len(batch) - filed} left for manual review.'
+    if remaining:
+        msg += f' {remaining} still unfiled — click again for the next batch.'
+    flash(msg, 'success')
     return redirect(url_for('fax_inbox_page'))
 
 

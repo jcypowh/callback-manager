@@ -3,11 +3,20 @@
 {% block content %}
 <h3 class="mb-1">Fax Inbox</h3>
 <p class="text-muted small mb-3">
-  Preview each document and file it — Pathology/Radiology go into a searchable
-  <a href="{{ url_for('fax_archive_page') }}">archive</a>, Referral creates a task like any other.
-  Includes actual faxes and referral letters that arrived as a plain PDF email attachment,
-  so nothing gets lost in either inbox.
+  Preview each document and file it — every category (Pathology, Radiology, Correspondence Letter,
+  Referral) is saved into the central <a href="{{ url_for('fax_archive_page') }}">Document Archive</a>,
+  and Referral also creates a callback task like any other. Includes actual faxes and referral letters
+  that arrived as a plain PDF email attachment, so nothing gets lost in either inbox.
 </p>
+
+{% if faxes and has_ai_key %}
+<form method="post" action="{{ url_for('ai_file_all_fax') }}" class="mb-3"
+      onsubmit="return confirm('Run AI Action on the next {{ ai_batch_size }} unfiled documents? Each one will be filed automatically if AI is confident, otherwise left for manual review.');">
+  <button class="btn btn-dark">
+    <i class="fa-solid fa-bolt"></i> Run AI Action on next {{ [faxes|length, ai_batch_size]|min }} of {{ faxes|length }} unfiled
+  </button>
+</form>
+{% endif %}
 
 {% if recently_filed %}
 <div class="card p-3 mb-4">

@@ -1,18 +1,26 @@
 {% extends 'base.html' %}
-{% block title %}Fax Archive — Callback Manager{% endblock %}
+{% block title %}Document Archive — Callback Manager{% endblock %}
 {% block content %}
-<h3 class="mb-1">Fax Archive</h3>
+<h3 class="mb-1">Document Archive</h3>
 <p class="text-muted small mb-3">
-  Filed pathology and radiology results — search here if a result isn't showing up elsewhere.
+  Every filed pathology, radiology, referral, and correspondence letter in one central, searchable
+  place — including referrals filed straight from a callback task.
   <a href="{{ url_for('fax_inbox_page') }}">Back to Fax Inbox</a>
 </p>
 
-<form method="get" class="mb-3" style="max-width:400px;">
+<form method="get" class="mb-3 d-flex gap-2" style="max-width:600px;">
   <input type="text" name="q" class="form-control" value="{{ q }}" placeholder="Search by patient name">
+  <select name="cat" class="form-select" style="max-width:220px;">
+    <option value="">All categories</option>
+    {% for key, label in categories.items() %}
+    <option value="{{ key }}" {% if cat == key %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn btn-outline-primary">Search</button>
 </form>
 
 {% if not faxes %}
-<p class="text-muted">{{ 'No matches.' if q else 'Nothing filed yet.' }}</p>
+<p class="text-muted">{{ 'No matches.' if (q or cat) else 'Nothing filed yet.' }}</p>
 {% else %}
 <table class="table table-sm bg-white align-middle">
   <thead><tr><th>Filed</th><th>Patient</th><th>Category</th><th>Source</th><th>Notes</th><th></th></tr></thead>
@@ -22,7 +30,9 @@
       <td class="text-nowrap small text-muted">{{ f.filed_at[:16].replace('T', ' ') if f.filed_at else '' }}</td>
       <td>{{ f.patient_name or '—' }}</td>
       <td>{{ categories.get(f.category, f.category) }}</td>
-      <td class="small">{{ 'Email' if f.source == 'email' else 'Fax' }}</td>
+      <td class="small">
+        {% if f.source == 'email' %}Email{% elif f.source == 'task' %}Callback task{% else %}Fax{% endif %}
+      </td>
       <td class="small">{{ f.notes or '' }}</td>
       <td><a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a></td>
     </tr>
