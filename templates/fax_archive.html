@@ -34,7 +34,15 @@
         {% if f.source == 'email' %}Email{% elif f.source == 'task' %}Callback task{% else %}Fax{% endif %}
       </td>
       <td class="small">{{ f.notes or '' }}</td>
-      <td><a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a></td>
+      <td class="text-nowrap">
+        <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>
+        <form method="post" action="{{ url_for('delete_fax', fax_id=f.id) }}" class="d-inline"
+              onsubmit="return confirm('{% if f.linked_task_id %}Delete this from the archive? The callback task it created is not affected.{% else %}Delete this document entirely? This can\'t be undone.{% endif %}');">
+          <button class="btn btn-sm btn-outline-danger" title="Delete - filed by mistake">
+            <i class="fa-solid fa-trash"></i>
+          </button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

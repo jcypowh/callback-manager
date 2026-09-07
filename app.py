@@ -2231,6 +2231,29 @@ def view_fax(fax_id):
     return send_file(str(path), mimetype='application/pdf')
 
 
+@app.route('/fax-inbox/<int:fax_id>/delete', methods=['POST'])
+def delete_fax(fax_id):
+    """Deletes a fax/email/task document entirely - for junk that got caught
+    by the broad email-attachment net, or a filed entry that was a mistake.
+    Does not touch any task it may have created (deleting the archive entry
+    is independent of the callback task itself)."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can delete documents.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    db = get_db()
+    fax = db.execute('SELECT * FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+    if not fax:
+        flash('Document not found.', 'warning')
+        return redirect(url_for('fax_inbox_page'))
+    was_filed = fax['category'] is not None
+    if fax['pdf_filename']:
+        (FAX_DIR / fax['pdf_filename']).unlink(missing_ok=True)
+    db.execute('DELETE FROM fax_documents WHERE id = ?', (fax_id,))
+    db.commit()
+    flash('Document deleted.', 'success')
+    return redirect(url_for('fax_archive_page') if was_filed else url_for('fax_inbox_page'))
+
+
 def _file_fax_document(db, fax, category, patient_name, phone_number, notes, assign_to_id, filed_by_id):
     """Shared by manual filing (file_fax) and AI auto-filing (ai_file_fax).
     category must already be validated against FAX_CATEGORIES. Returns the

@@ -70,6 +70,12 @@
           </button>
         </form>
         {% endif %}
+        <form method="post" action="{{ url_for('delete_fax', fax_id=f.id) }}"
+              onsubmit="return confirm('Delete this document entirely? This can\'t be undone.');">
+          <button class="btn btn-sm btn-outline-danger" title="Delete - junk or wrong catch">
+            <i class="fa-solid fa-trash"></i>
+          </button>
+        </form>
       </div>
     </div>
 
