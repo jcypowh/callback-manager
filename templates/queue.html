@@ -55,10 +55,31 @@
 </p>
 {% else %}
 
+{% if view == 'mine' and not is_delegate %}
+<form id="bulk-resolve-form" method="post" action="{{ url_for('bulk_resolve_tasks') }}"
+      onsubmit="return confirm('Resolve all selected tasks? No outcome note is recorded, same as Quick archive.');">
+  <input type="hidden" name="view" value="{{ view }}">
+</form>
+<div class="d-flex align-items-center gap-2 mb-3">
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" id="select-all-tasks">
+    <label class="form-check-label small" for="select-all-tasks">Select all</label>
+  </div>
+  <button type="submit" form="bulk-resolve-form" id="bulk-resolve-btn" class="btn btn-sm btn-outline-success" disabled>
+    <i class="fa-solid fa-box-archive"></i> Resolve selected (<span id="bulk-resolve-count">0</span>)
+  </button>
+</div>
+{% endif %}
+
 {% for t in tasks %}
 <div class="card mb-3{% if t.urgency %} card-urgency-{{ t.urgency }}{% endif %}">
   <div class="card-body pb-2">
     <div class="d-flex justify-content-between flex-wrap gap-2">
+      <div class="d-flex gap-2">
+        {% if view == 'mine' and not is_delegate %}
+        <input class="form-check-input task-select-checkbox mt-1" type="checkbox" name="task_ids"
+               value="{{ t.id }}" form="bulk-resolve-form">
+        {% endif %}
       <div>
         <div class="small text-muted">
           {{ t.created_at[:16].replace('T', ' ') }} · {{ t.source_label or 'Unknown practice' }}
@@ -75,6 +96,7 @@
           {{ t.patient_name or '(unparsed — see message)' }}
           {% if t.phone_number %}· <a href="tel:{{ t.phone_number }}">{{ t.phone_number }}</a>{% endif %}
         </h6>
+      </div>
       </div>
       <div class="text-end">
         {% if view == 'questions' %}
@@ -342,14 +364,36 @@
 .urgency-btn-green.active { background-color: #198754; color: #fff; }
 </style>
 <script>
+var selectAllTasks = document.getElementById('select-all-tasks');
+var taskCheckboxes = document.querySelectorAll('.task-select-checkbox');
+var bulkResolveBtn = document.getElementById('bulk-resolve-btn');
+var bulkResolveCount = document.getElementById('bulk-resolve-count');
+
+function updateBulkResolveButton() {
+  if (!bulkResolveBtn) return;
+  var checked = document.querySelectorAll('.task-select-checkbox:checked').length;
+  bulkResolveCount.textContent = checked;
+  bulkResolveBtn.disabled = checked === 0;
+}
+if (selectAllTasks) {
+  selectAllTasks.addEventListener('change', function () {
+    taskCheckboxes.forEach(function (cb) { cb.checked = selectAllTasks.checked; });
+    updateBulkResolveButton();
+  });
+}
+taskCheckboxes.forEach(function (cb) {
+  cb.addEventListener('change', updateBulkResolveButton);
+});
+
 // Keep the queue reasonably fresh so nobody's looking at a stale list - but
-// never interrupt someone mid-note.
+// never interrupt someone mid-note or mid bulk-select.
 setInterval(function () {
   var active = document.activeElement;
   var typing = active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
   var hasDraft = Array.from(document.querySelectorAll('input[name="note"], input[name="reason"], input[name="question"], input[name="answer"], input[name="instructions"], input[name="minutes"]'))
     .some(function (el) { return el.value.trim().length > 0; });
-  if (!typing && !hasDraft) {
+  var hasSelection = document.querySelectorAll('.task-select-checkbox:checked').length > 0;
+  if (!typing && !hasDraft && !hasSelection) {
     window.location.reload();
   }
 }, 20000);

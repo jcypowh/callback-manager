@@ -1292,6 +1292,21 @@ def resolve_task(task_id):
     return render_template('resolve.html', task=task, notes=notes)
 
 
+def _quick_archive_one(db, task_id, user, now):
+    """Shared by the single quick-archive route and bulk-resolve. Returns
+    True if it archived the task, False if it was already done/missing."""
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or task['status'] == 'done':
+        return False
+    db.execute(
+        "UPDATE tasks SET status = 'done', outcome_type = 'completed', outcome_note = ?, "
+        "actioned_by_id = ?, actioned_at = ?, pending_question_for = NULL, "
+        "claimed_by_id = COALESCE(claimed_by_id, ?) WHERE id = ?",
+        ('Quick-archived from the queue.', user['id'], now, user['id'], task_id),
+    )
+    return True
+
+
 @app.route('/task/<int:task_id>/quick-archive', methods=['POST'])
 def quick_archive_task(task_id):
     """One-click archive for Dr Tu/Sally - skips the outcome-note form for
@@ -1300,21 +1315,46 @@ def quick_archive_task(task_id):
         flash('Only Dr Tu or Sally can quick-archive.', 'warning')
         return redirect(url_for('queue'))
     db = get_db()
-    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    if not task or task['status'] == 'done':
-        flash('That task is already resolved.', 'warning')
-        return redirect(url_for('queue'))
     user = current_user()
     now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        "UPDATE tasks SET status = 'done', outcome_type = 'completed', outcome_note = ?, "
-        "actioned_by_id = ?, actioned_at = ?, pending_question_for = NULL, "
-        "claimed_by_id = COALESCE(claimed_by_id, ?) WHERE id = ?",
-        ('Quick-archived from the queue.', user['id'], now, user['id'], task_id),
-    )
+    if not _quick_archive_one(db, task_id, user, now):
+        flash('That task is already resolved.', 'warning')
+        return redirect(url_for('queue'))
     db.commit()
     flash('Task archived.', 'success')
     return redirect(url_for('queue'))
+
+
+@app.route('/tasks/bulk-resolve', methods=['POST'])
+def bulk_resolve_tasks():
+    """Resolve a whole checked selection from the queue at once - same as
+    Quick Archive, just looped, so clearing a big backlog doesn't take one
+    click per task. Only ever acts on tasks the requester can manage."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can bulk-resolve.', 'warning')
+        return redirect(url_for('queue'))
+    view = request.form.get('view', 'mine')
+    task_ids = request.form.getlist('task_ids')
+    if not task_ids:
+        flash('Nothing selected.', 'warning')
+        return redirect(url_for('queue', view=view))
+    db = get_db()
+    user = current_user()
+    now = datetime.now(timezone.utc).isoformat()
+    count = 0
+    for raw_id in task_ids:
+        try:
+            task_id = int(raw_id)
+        except ValueError:
+            continue
+        task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+        if not task or not _can_manage_task(task):
+            continue
+        if _quick_archive_one(db, task_id, user, now):
+            count += 1
+    db.commit()
+    flash(f'Resolved {count} task(s).', 'success')
+    return redirect(url_for('queue', view=view))
 
 
 @app.route('/task/<int:task_id>/sms', methods=['GET', 'POST'])
