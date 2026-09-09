@@ -2339,7 +2339,12 @@ def fax_archive_page():
         params.append(f'%{q}%')
     query += " ORDER BY filed_at DESC LIMIT 200"
     filed = db.execute(query, params).fetchall()
-    return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q, cat=cat)
+    missing_name_count = db.execute(
+        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL AND (patient_name IS NULL OR patient_name = '')"
+    ).fetchone()['n']
+    return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q, cat=cat,
+                            missing_name_count=missing_name_count, has_ai_key=bool(cfg('anthropic_api_key')),
+                            ai_batch_size=AI_BATCH_SIZE)
 
 
 @app.route('/fax-inbox/<int:fax_id>/view')
@@ -2554,6 +2559,70 @@ def ai_file_all_fax():
         msg += f' {remaining} still unfiled — click again for the next batch.'
     flash(msg, 'success')
     return redirect(url_for('fax_inbox_page'))
+
+
+def _ai_fill_patient_name_one(db, fax):
+    """Re-reads an already-filed document's PDF to find just the patient
+    name, for entries that got filed with a blank one. Only ever updates
+    patient_name (plus the ai_* fields for reference) - never touches the
+    category or creates a task. Returns True if it found and set a name."""
+    pdf_path = FAX_DIR / fax['pdf_filename']
+    if not pdf_path.exists():
+        return False
+    try:
+        result = _analyze_fax_with_ai(pdf_path.read_bytes())
+    except Exception:
+        logger.exception('AI name-fill failed for fax %s', fax['id'])
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        'UPDATE fax_documents SET ai_category = ?, ai_patient_name = ?, ai_suggested_action = ?, '
+        'ai_reasoning = ?, ai_analyzed_at = ? WHERE id = ?',
+        (result['category'], result['patient_name'], result['suggested_action'], result['reasoning'], now, fax['id']),
+    )
+    if not result['patient_name']:
+        return False
+    db.execute('UPDATE fax_documents SET patient_name = ? WHERE id = ?', (result['patient_name'], fax['id']))
+    return True
+
+
+@app.route('/fax-inbox/archive/fill-names', methods=['POST'])
+def ai_fill_archive_names():
+    """Bulk re-run AI on already-filed documents that are missing a patient
+    name, so a referral isn't stuck filed under blank. Batched like the Fax
+    Inbox's mass AI Action, for the same request-timeout reasons - repeat
+    clicks work through the rest."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can use AI filing.', 'warning')
+        return redirect(url_for('fax_archive_page'))
+    if not cfg('anthropic_api_key'):
+        flash('Set up the Anthropic API key under Settings first.', 'warning')
+        return redirect(url_for('fax_archive_page'))
+    db = get_db()
+    batch = db.execute(
+        "SELECT * FROM fax_documents WHERE category IS NOT NULL AND (patient_name IS NULL OR patient_name = '') "
+        "ORDER BY filed_at ASC LIMIT ?",
+        (AI_BATCH_SIZE,),
+    ).fetchall()
+    if not batch:
+        flash('Nothing missing a name.', 'success')
+        return redirect(url_for('fax_archive_page'))
+
+    found = 0
+    for fax in batch:
+        if _ai_fill_patient_name_one(db, fax):
+            found += 1
+    db.commit()
+
+    remaining = db.execute(
+        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL "
+        "AND (patient_name IS NULL OR patient_name = '')"
+    ).fetchone()['n']
+    msg = f'AI ran on {len(batch)}: found a name for {found}, {len(batch) - found} still blank.'
+    if remaining:
+        msg += f' {remaining} still missing a name — click again for the next batch.'
+    flash(msg, 'success')
+    return redirect(url_for('fax_archive_page'))
 
 
 # ---------- paid Q&A / script requests (public-facing, Stripe) ----------

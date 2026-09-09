@@ -19,6 +19,16 @@
   <button class="btn btn-outline-primary">Search</button>
 </form>
 
+{% if missing_name_count and has_ai_key %}
+<form method="post" action="{{ url_for('ai_fill_archive_names') }}" class="mb-3"
+      onsubmit="return confirm('Run AI on the next {{ [missing_name_count, ai_batch_size]|min }} filed documents missing a patient name?');">
+  <button class="btn btn-dark">
+    <i class="fa-solid fa-bolt"></i> Fill missing names with AI
+    ({{ [missing_name_count, ai_batch_size]|min }} of {{ missing_name_count }})
+  </button>
+</form>
+{% endif %}
+
 {% if not faxes %}
 <p class="text-muted">{{ 'No matches.' if (q or cat) else 'Nothing filed yet.' }}</p>
 {% else %}
@@ -28,7 +38,7 @@
     {% for f in faxes %}
     <tr>
       <td class="text-nowrap small text-muted">{{ f.filed_at[:16].replace('T', ' ') if f.filed_at else '' }}</td>
-      <td>{{ f.patient_name or '—' }}</td>
+      <td>{% if f.patient_name %}{{ f.patient_name }}{% else %}<span class="badge bg-warning text-dark">No name</span>{% endif %}</td>
       <td>{{ categories.get(f.category, f.category) }}</td>
       <td class="small">
         {% if f.source == 'email' %}Email{% elif f.source == 'task' %}Callback task{% else %}Fax{% endif %}
