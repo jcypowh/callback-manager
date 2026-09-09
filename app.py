@@ -382,6 +382,15 @@ def _migrate(db):
     db.execute("UPDATE users SET role = 'admin' WHERE display_name = 'Sally' AND role = 'actioneer'")
     # 'Forward to Dr Tu' needs to know which admin is actually the doctor.
     db.execute("UPDATE users SET is_doctor = 1 WHERE display_name = 'Dr Jeffrey Tu'")
+
+    # Rosie - second delegate alongside Warren, same access and starting
+    # rates (adjustable later under Users/Payroll). Uses the existing shared
+    # login password - no new credential involved.
+    if not db.execute("SELECT id FROM users WHERE display_name = 'Rosie'").fetchone():
+        db.execute(
+            "INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, office_hourly_rate, active) "
+            "VALUES ('Rosie', 'delegate', 30.0, 33.0, 40.0, 1)"
+        )
     db.commit()
 
 
