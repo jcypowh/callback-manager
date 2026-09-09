@@ -210,6 +210,14 @@
         <a href="{{ url_for('confirm_appointment', task_id=t.id) }}" class="btn btn-sm btn-success">
           📱 Confirm appointment with patient
         </a>
+        {% elif t.intake_kind not in ('appointment_new', 'appointment_followup') %}
+          {% if t.referral_ack_sms_sent_at %}
+          <span class="badge bg-success align-self-center">✅ Referral ack texted</span>
+          {% else %}
+          <a href="{{ url_for('text_referral_ack', task_id=t.id) }}" class="btn btn-sm btn-success">
+            📱 Acknowledge referral (SMS)
+          </a>
+          {% endif %}
         {% endif %}
       </div>
 
@@ -313,6 +321,14 @@
         <a href="{{ url_for('confirm_appointment', task_id=t.id) }}" class="btn btn-sm btn-success align-self-start">
           📱 Confirm appointment with patient
         </a>
+        {% elif t.intake_kind not in ('appointment_new', 'appointment_followup') %}
+          {% if t.referral_ack_sms_sent_at %}
+          <span class="badge bg-success align-self-start mt-1">✅ Referral ack texted</span>
+          {% else %}
+          <a href="{{ url_for('text_referral_ack', task_id=t.id) }}" class="btn btn-sm btn-success align-self-start">
+            📱 Acknowledge referral (SMS)
+          </a>
+          {% endif %}
         {% endif %}
 
         {% if not is_delegate %}

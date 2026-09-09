@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     payroll_run_id INTEGER,
     doctor_handled_at TEXT,
     doctor_handled_by_id INTEGER,
-    pending_question_for INTEGER
+    pending_question_for INTEGER,
+    referral_ack_sms_sent_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_notes (
@@ -308,7 +309,8 @@ def _migrate(db):
     existing_task_cols = {row['name'] for row in db.execute('PRAGMA table_info(tasks)').fetchall()}
     for col, decl in [('doctor_handled_at', 'TEXT'), ('doctor_handled_by_id', 'INTEGER'),
                        ('pending_question_for', 'INTEGER'), ('attachment_filename', 'TEXT'),
-                       ('intake_source', 'TEXT'), ('intake_kind', 'TEXT'), ('urgency', 'TEXT')]:
+                       ('intake_source', 'TEXT'), ('intake_kind', 'TEXT'), ('urgency', 'TEXT'),
+                       ('referral_ack_sms_sent_at', 'TEXT')]:
         if col not in existing_task_cols:
             db.execute(f'ALTER TABLE tasks ADD COLUMN {col} {decl}')
 
@@ -1107,6 +1109,56 @@ def confirm_appointment(task_id):
         return redirect(url_for('queue'))
 
     return render_template('confirm_appointment.html', task=task, default_message=default_message)
+
+
+@app.route('/task/<int:task_id>/text-referral-ack', methods=['GET', 'POST'])
+def text_referral_ack(task_id):
+    """One-tap SMS for a parsed referral that just needs a call-to-book -
+    acknowledges receipt and points the patient at the phone number/booking
+    site, with no appointment details to fill in (unlike Confirm appointment,
+    which is for a Solium AI booking that already has a time)."""
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task:
+        flash('Task not found.', 'warning')
+        return redirect(url_for('queue'))
+    if not _can_manage_task(task):
+        flash('That task is not assigned to you.', 'warning')
+        return redirect(url_for('queue'))
+
+    greeting = f"Dear {task['patient_name']}," if task['patient_name'] else 'Hello,'
+    default_message = (
+        f'{greeting} we acknowledged receiving the referral from your GP. If you would like to '
+        'make an appointment, please call our office on (0272458903) or book online at '
+        'www.jeffreytu.com.'
+    )
+
+    if request.method == 'POST':
+        phone_number = request.form.get('phone_number', '').strip() or task['phone_number']
+        message = request.form.get('message', '').strip()
+        if not phone_number:
+            flash('Enter a phone number to text.', 'danger')
+            return render_template('text_referral_ack.html', task=task, default_message=message)
+        if not message:
+            flash('Message cannot be empty.', 'danger')
+            return render_template('text_referral_ack.html', task=task, default_message=message)
+        error = _send_sms(phone_number, message, alpha_tag=cfg('patient_sms_alpha_tag', 'DrJeffreyTu'))
+        if error:
+            flash(f'Could not send SMS: {error}', 'danger')
+            return render_template('text_referral_ack.html', task=task, default_message=message)
+        now = datetime.now(timezone.utc).isoformat()
+        if not task['phone_number']:
+            db.execute('UPDATE tasks SET phone_number = ? WHERE id = ?', (phone_number, task_id))
+        db.execute('UPDATE tasks SET referral_ack_sms_sent_at = ? WHERE id = ?', (now, task_id))
+        db.execute(
+            'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
+            (task_id, session['user_id'], now, f'Sent referral-acknowledgement SMS to patient: "{message}"'),
+        )
+        db.commit()
+        flash('Referral-acknowledgement SMS sent to patient.', 'success')
+        return redirect(url_for('queue'))
+
+    return render_template('text_referral_ack.html', task=task, default_message=default_message)
 
 
 @app.route('/task/<int:task_id>/unclaim', methods=['POST'])
