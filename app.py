@@ -847,7 +847,8 @@ def queue():
         placeholders = ','.join('?' * len(attachment_task_ids))
         filed_task_ids = {
             row['linked_task_id'] for row in db.execute(
-                f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders})',
+                f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders}) '
+                'AND category IS NOT NULL',
                 attachment_task_ids,
             ).fetchall()
         }
@@ -901,6 +902,7 @@ def queue():
         'queue.html', tasks=tasks, sources=sources, handoff_targets=handoff_targets,
         is_delegate=is_delegate, view=view, untouched_count=untouched_count, mine_count=mine_count,
         questions_count=questions_count, notify_targets=notify_targets, urgency_levels=URGENCY_LEVELS,
+        has_ai_key=bool(cfg('anthropic_api_key')),
     )
 
 
@@ -1117,47 +1119,119 @@ def unclaim_task(task_id):
     return redirect(url_for('queue'))
 
 
-@app.route('/task/<int:task_id>/file-referral', methods=['POST'])
-def file_task_referral(task_id):
-    """Files this task's attached referral into the central Document Archive
-    (same place as fax/email referrals) so it's never lost - available to
-    whoever handled the task, not just full-access users. Doesn't create a
-    new task; linked_task_id just points back to this one."""
-    db = get_db()
-    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    if not task:
-        flash('Task not found.', 'warning')
-        return redirect(url_for('queue'))
-    if not _can_manage_task(task):
-        flash('That task is not assigned to you.', 'warning')
-        return redirect(url_for('queue'))
-    if not task['attachment_filename']:
-        flash('This task has no referral document attached to file.', 'warning')
-        return redirect(url_for('queue'))
-    already = db.execute(
-        'SELECT id FROM fax_documents WHERE linked_task_id = ?', (task_id,)
+def _get_or_create_task_fax_row(db, task):
+    """Returns the fax_documents row backing this task's attachment - reuses
+    an existing unfiled one (e.g. left behind by an AI attempt that couldn't
+    place it) instead of copying the PDF into FAX_DIR a second time. Returns
+    None if there's no attachment file to copy."""
+    fax = db.execute(
+        'SELECT * FROM fax_documents WHERE linked_task_id = ? AND category IS NULL', (task['id'],)
     ).fetchone()
-    if already:
-        flash('This referral has already been filed.', 'warning')
-        return redirect(url_for('queue'))
+    if fax:
+        return fax
     attachment_path = REFERRAL_DIR / task['attachment_filename']
     if not attachment_path.exists():
-        flash('The attached file is missing.', 'warning')
-        return redirect(url_for('queue'))
-
-    now = datetime.now(timezone.utc).isoformat()
+        return None
     cur = db.execute(
-        'INSERT INTO fax_documents (received_at, pdf_filename, category, patient_name, filed_by_id, '
-        'filed_at, linked_task_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        (task['created_at'], '', 'referral', task['patient_name'], session['user_id'], now, task_id, 'task'),
+        'INSERT INTO fax_documents (received_at, pdf_filename, linked_task_id, source, patient_name) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (task['created_at'], '', task['id'], 'task', task['patient_name']),
     )
     fax_id = cur.lastrowid
     filename = f'{fax_id}.pdf'
     (FAX_DIR / filename).write_bytes(attachment_path.read_bytes())
     db.execute('UPDATE fax_documents SET pdf_filename = ? WHERE id = ?', (filename, fax_id))
+    return db.execute('SELECT * FROM fax_documents WHERE id = ?', (fax_id,)).fetchone()
+
+
+@app.route('/task/<int:task_id>/file-referral', methods=['POST'])
+def file_task_referral(task_id):
+    """Files this task's attached referral into the central Document Archive
+    (same place as fax/email referrals) so it's never lost - available to
+    whoever handled the task, not just full-access users, whether the task
+    is still active or already resolved. Doesn't create a new task;
+    linked_task_id just points back to this one."""
+    back = request.referrer or url_for('queue')
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task:
+        flash('Task not found.', 'warning')
+        return redirect(back)
+    if not _can_manage_task(task):
+        flash('That task is not assigned to you.', 'warning')
+        return redirect(back)
+    if not task['attachment_filename']:
+        flash('This task has no referral document attached to file.', 'warning')
+        return redirect(back)
+    already = db.execute(
+        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL', (task_id,)
+    ).fetchone()
+    if already:
+        flash('This referral has already been filed.', 'warning')
+        return redirect(back)
+
+    fax = _get_or_create_task_fax_row(db, task)
+    if not fax:
+        flash('The attached file is missing.', 'warning')
+        return redirect(back)
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        "UPDATE fax_documents SET category = 'referral', patient_name = ?, filed_by_id = ?, filed_at = ? "
+        "WHERE id = ?",
+        (task['patient_name'], session['user_id'], now, fax['id']),
+    )
     db.commit()
     flash('Referral filed in the Document Archive.', 'success')
-    return redirect(url_for('queue'))
+    return redirect(back)
+
+
+@app.route('/task/<int:task_id>/ai-file-referral', methods=['POST'])
+def ai_file_task_referral(task_id):
+    """Lets AI read a task's attachment and file it under whatever it
+    actually is (referral/pathology/radiology/correspondence) rather than
+    assuming referral - for the backlog of already-resolved tasks that still
+    need their document filed centrally. Dr Tu/Sally only, same as the other
+    AI actions."""
+    back = request.referrer or url_for('queue')
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can use AI filing.', 'warning')
+        return redirect(back)
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task:
+        flash('Task not found.', 'warning')
+        return redirect(back)
+    if not task['attachment_filename']:
+        flash('This task has no document attached to file.', 'warning')
+        return redirect(back)
+    already = db.execute(
+        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL', (task_id,)
+    ).fetchone()
+    if already:
+        flash('This has already been filed.', 'warning')
+        return redirect(back)
+    if not cfg('anthropic_api_key'):
+        flash('Set up the Anthropic API key under Settings first.', 'warning')
+        return redirect(back)
+
+    fax = _get_or_create_task_fax_row(db, task)
+    if not fax:
+        flash('The attached file is missing.', 'warning')
+        return redirect(back)
+
+    outcome = _ai_analyze_and_file_one(db, fax, session['user_id'])
+    db.commit()
+
+    if outcome['filed']:
+        flash(f"AI filed as {FAX_CATEGORIES[outcome['category']]} — {outcome['patient_name']}.", 'success')
+    elif outcome['reason'] == 'category unclear':
+        flash("AI couldn't confidently tell what this is — file it from the Fax Inbox instead.", 'warning')
+    elif outcome['reason'] == 'no patient name found':
+        flash("AI couldn't find a patient name — file it from the Fax Inbox instead.", 'warning')
+    else:
+        flash(f"AI could not read this one: {outcome['reason']}", 'danger')
+    return redirect(back)
 
 
 @app.route('/task/<int:task_id>/note', methods=['POST'])
@@ -1608,7 +1682,21 @@ def archive():
         params += [like, like, like]
     query += " ORDER BY t.actioned_at DESC LIMIT 200"
     tasks = db.execute(query, params).fetchall()
-    return render_template('archive.html', tasks=tasks, q=q)
+
+    attachment_task_ids = [t['id'] for t in tasks if t['attachment_filename']]
+    filed_task_ids = set()
+    if attachment_task_ids:
+        placeholders = ','.join('?' * len(attachment_task_ids))
+        filed_task_ids = {
+            row['linked_task_id'] for row in db.execute(
+                f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders}) '
+                'AND category IS NOT NULL',
+                attachment_task_ids,
+            ).fetchall()
+        }
+
+    return render_template('archive.html', tasks=tasks, q=q, filed_task_ids=filed_task_ids,
+                            has_ai_key=bool(cfg('anthropic_api_key')))
 
 
 # ---------- time logging (not tied to a specific task) ----------
@@ -2297,11 +2385,17 @@ def delete_fax(fax_id):
 def _file_fax_document(db, fax, category, patient_name, phone_number, notes, assign_to_id, filed_by_id):
     """Shared by manual filing (file_fax) and AI auto-filing (ai_file_fax).
     category must already be validated against FAX_CATEGORIES. Returns the
-    linked_task_id (or None)."""
-    now = datetime.now(timezone.utc).isoformat()
-    linked_task_id = None
+    linked_task_id (or None).
 
-    if category == 'referral':
+    If `fax` already has a linked_task_id (it was filed FROM an existing
+    callback task, via file_task_referral/ai_file_task_referral), that link
+    is preserved as-is and NO new task is created - the callback was already
+    handled. A new task is only created for a fax/email referral that isn't
+    already tied to one."""
+    now = datetime.now(timezone.utc).isoformat()
+    linked_task_id = fax['linked_task_id']
+
+    if category == 'referral' and not linked_task_id:
         if fax['source'] == 'email':
             message = f'Referral from email (received from {fax["from_address"] or "unknown sender"}).'
         else:

@@ -21,6 +21,7 @@
       <th>Outcome</th>
       <th>Note</th>
       <th>Result written by</th>
+      <th>Document</th>
       <th></th>
     </tr>
   </thead>
@@ -34,6 +35,25 @@
       <td><span class="badge bg-success">{{ outcome_labels.get(t.outcome_type, t.outcome_type) }}</span></td>
       <td style="max-width:280px; white-space:pre-wrap;">{{ t.outcome_note }}</td>
       <td>{{ t.actioned_by_name }}</td>
+      <td class="text-nowrap">
+        {% if t.attachment_filename %}
+        <a href="{{ url_for('view_referral_attachment', task_id=t.id) }}" target="_blank" class="btn btn-sm btn-outline-secondary">📎</a>
+        {% if t.id in filed_task_ids %}
+        <span class="badge bg-success">Filed</span>
+        {% else %}
+        <form method="post" action="{{ url_for('file_task_referral', task_id=t.id) }}" class="d-inline">
+          <button class="btn btn-sm btn-outline-primary" title="Files this as a referral into the central Document Archive">File Referral</button>
+        </form>
+        {% if has_ai_key %}
+        <form method="post" action="{{ url_for('ai_file_task_referral', task_id=t.id) }}" class="d-inline">
+          <button class="btn btn-sm btn-dark" title="AI reads it and files it under whatever it actually is">
+            <i class="fa-solid fa-bolt"></i>
+          </button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {% endif %}
+      </td>
       <td>
         {% if t.paid_count %}
         <span class="text-muted small" title="Already included in a paid payroll run">Paid — locked</span>

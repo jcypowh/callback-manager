@@ -132,10 +132,17 @@
       <span class="badge bg-success">Referral filed</span>
       {% else %}
       <form method="post" action="{{ url_for('file_task_referral', task_id=t.id) }}">
-        <button class="btn btn-sm btn-outline-primary" title="Files this referral into the central Document Archive">
+        <button class="btn btn-sm btn-outline-primary" title="Files this as a referral into the central Document Archive">
           File Referral
         </button>
       </form>
+      {% if not is_delegate and has_ai_key %}
+      <form method="post" action="{{ url_for('ai_file_task_referral', task_id=t.id) }}">
+        <button class="btn btn-sm btn-dark" title="AI reads it and files it under whatever it actually is - referral, pathology, radiology, or correspondence">
+          <i class="fa-solid fa-bolt"></i> AI Action
+        </button>
+      </form>
+      {% endif %}
       {% endif %}
     </div>
     {% endif %}
