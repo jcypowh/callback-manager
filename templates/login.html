@@ -26,15 +26,14 @@
           {% for u in users %}
           <option value="{{ u.id }}">{{ u.display_name }}</option>
           {% endfor %}
+          {% if has_payroll_password %}
+          <option value="payroll">Mediq Payroll</option>
+          {% endif %}
         </select>
       </div>
       <div class="mb-3">
         <label class="form-label">Password</label>
         <input type="password" name="password" class="form-control" autofocus required>
-        <div class="form-text">
-          Payroll-only access (e.g. Mediq)? It's not in the list above — just enter that
-          password here and log in; who's selected above doesn't matter for it.
-        </div>
       </div>
       <button type="submit" class="btn btn-primary w-100">Log in</button>
     </form>

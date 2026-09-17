@@ -619,14 +619,18 @@ def login():
             return redirect(url_for('login'))
 
         password = request.form.get('password', '')
+        user_id = request.form.get('user_id', '')
 
-        payroll_hash = cfg('payroll_password_hash')
-        if payroll_hash and check_password_hash(payroll_hash, password):
-            session.clear()
-            session['payroll_only'] = True
-            return redirect(url_for('payroll'))
+        if user_id == 'payroll':
+            payroll_hash = cfg('payroll_password_hash')
+            if payroll_hash and check_password_hash(payroll_hash, password):
+                session.clear()
+                session['payroll_only'] = True
+                return redirect(url_for('payroll'))
+            flash('Incorrect password.', 'danger')
+            return render_template('login.html', first_run=first_run, users=users,
+                                    has_payroll_password=bool(cfg('payroll_password_hash')))
 
-        user_id = request.form.get('user_id')
         user = db.execute('SELECT * FROM users WHERE id = ? AND active = 1', (user_id,)).fetchone()
         if user and check_password_hash(cfg('shared_password_hash'), password):
             session['user_id'] = user['id']
@@ -635,7 +639,8 @@ def login():
             return redirect(request.args.get('next') or url_for('queue'))
         flash('Incorrect password.', 'danger')
 
-    return render_template('login.html', first_run=first_run, users=users)
+    return render_template('login.html', first_run=first_run, users=users,
+                            has_payroll_password=bool(cfg('payroll_password_hash')))
 
 
 @app.route('/logout')
