@@ -1,27 +1,47 @@
 {% extends 'base.html' %}
 {% block title %}Payroll — Callback Manager{% endblock %}
 {% block content %}
-<h3 class="mb-3">Payroll</h3>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+  <div>
+    <h3 class="mb-1">Payroll</h3>
+    <p class="text-muted small mb-0">
+      {% if is_payroll_only %}
+      View, mark as paid, and export reports. Only Dr Tu or Sally can adjust an amount, remove an
+      entry, or change a pay rate.
+      {% else %}
+      Off-office rate covers per-task minutes and standalone off-office support hours; office rate
+      is for time logged in-office with Dr Tu.
+      {% endif %}
+    </p>
+  </div>
+</div>
 
 <div class="row g-3 mb-4">
   {% for row in totals %}
   <div class="col-12 col-lg-6">
-    <div class="card">
+    <div class="card h-100">
       <div class="card-body">
-        <h5 class="card-title">{{ row.user.display_name }}</h5>
+        <div class="d-flex justify-content-between align-items-start">
+          <h5 class="card-title mb-3">{{ row.user.display_name }}</h5>
+          <div class="text-muted small text-end">
+            {% if row.user.clinic_hourly_rate or row.user.hourly_rate %}
+            <div>Off-office: ${{ '%.2f'|format(row.user.clinic_hourly_rate or row.user.hourly_rate) }}/hr</div>
+            {% endif %}
+            {% if row.user.office_hourly_rate %}
+            <div>Office: ${{ '%.2f'|format(row.user.office_hourly_rate) }}/hr</div>
+            {% endif %}
+          </div>
+        </div>
 
+        {% if not is_payroll_only %}
         <form method="post" class="row g-2 align-items-end mb-3">
           <input type="hidden" name="action" value="update_rates">
           <input type="hidden" name="user_id" value="{{ row.user.id }}">
           <div class="col-auto">
-            <label class="form-label small mb-0">Telephone task rate ($/hr)</label>
-            <input type="number" step="0.01" min="0" name="hourly_rate" class="form-control form-control-sm"
-                   style="width:110px;" value="{{ row.user.hourly_rate if row.user.hourly_rate is not none else '' }}">
-          </div>
-          <div class="col-auto">
             <label class="form-label small mb-0">Off-office rate ($/hr)</label>
-            <input type="number" step="0.01" min="0" name="clinic_hourly_rate" class="form-control form-control-sm"
-                   style="width:110px;" value="{{ row.user.clinic_hourly_rate if row.user.clinic_hourly_rate is not none else '' }}">
+            <input type="number" step="0.01" min="0" name="off_office_rate" class="form-control form-control-sm"
+                   style="width:110px;"
+                   value="{{ row.user.clinic_hourly_rate if row.user.clinic_hourly_rate is not none else (row.user.hourly_rate if row.user.hourly_rate is not none else '') }}">
           </div>
           <div class="col-auto">
             <label class="form-label small mb-0">Office rate ($/hr)</label>
@@ -32,36 +52,45 @@
             <button class="btn btn-sm btn-outline-secondary">Save rates</button>
           </div>
         </form>
+        {% endif %}
 
         <p class="text-muted small mb-1">
           {{ row.minutes|round|int }} min logged across {{ row.count }} entr{{ 'y' if row.count == 1 else 'ies' }}, unpaid
         </p>
         <p class="fs-4 fw-bold mb-3">${{ '%.2f'|format(row.total) }}</p>
-        {% if row.total > 0 %}
-        <form method="post" class="d-inline">
-          <input type="hidden" name="action" value="mark_paid">
-          <input type="hidden" name="user_id" value="{{ row.user.id }}">
-          <button class="btn btn-success btn-sm">Mark paid</button>
-        </form>
-        {% endif %}
+        <div class="d-flex gap-2 flex-wrap">
+          {% if row.total > 0 %}
+          <form method="post" class="d-inline">
+            <input type="hidden" name="action" value="mark_paid">
+            <input type="hidden" name="user_id" value="{{ row.user.id }}">
+            <button class="btn btn-success btn-sm">Mark paid</button>
+          </form>
+          {% endif %}
+          <a class="btn btn-outline-secondary btn-sm"
+             href="{{ url_for('payroll_export_pdf', user_id=row.user.id) }}">
+            <i class="fa-solid fa-file-pdf"></i> Download unpaid summary (PDF)
+          </a>
+        </div>
 
         {% if row.entries %}
         <details class="mt-3">
           <summary class="small text-muted">Show {{ row.entries|length }} unpaid entr{{ 'y' if row.entries|length == 1 else 'ies' }}</summary>
           <table class="table table-sm mt-2">
-            <thead><tr><th>When</th><th>What</th><th>Min</th><th>Amount</th><th></th></tr></thead>
+            <thead><tr><th>When</th><th>What</th><th>Min</th><th>Amount</th>{% if not is_payroll_only %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for e in row.entries %}
               <tr>
                 <td class="text-nowrap small text-muted">{{ e.created_at[:16].replace('T', ' ') }}</td>
                 <td class="small">
-                  {% if e.reason == 'clinic_time' %}Off-office support hours
+                  {% if e.reason in ('clinic_time', 'phone_time') %}Off-office support hours
                   {% elif e.reason == 'office_time' %}Office hours
-                  {% elif e.reason == 'phone_time' %}Phone time
                   {% elif e.task_id %}Task work
                   {% else %}{{ e.reason }}{% endif %}
                 </td>
                 <td class="small">{{ e.minutes|round|int if e.minutes else '—' }}</td>
+                {% if is_payroll_only %}
+                <td class="small">${{ '%.2f'|format(e.amount) }}</td>
+                {% else %}
                 <td>
                   <form method="post" class="d-flex gap-1">
                     <input type="hidden" name="action" value="adjust_payment">
@@ -78,6 +107,7 @@
                     <button class="btn btn-sm btn-outline-danger" title="Remove entirely">Remove</button>
                   </form>
                 </td>
+                {% endif %}
               </tr>
               {% endfor %}
             </tbody>
@@ -91,8 +121,24 @@
 </div>
 
 <h5>Payment history</h5>
+<form method="get" class="mb-3 d-flex gap-2 align-items-end flex-wrap">
+  <div>
+    <label class="form-label small mb-0">From</label>
+    <input type="date" name="from" class="form-control form-control-sm" value="{{ period_from }}">
+  </div>
+  <div>
+    <label class="form-label small mb-0">To</label>
+    <input type="date" name="to" class="form-control form-control-sm" value="{{ period_to }}">
+  </div>
+  <button class="btn btn-outline-primary btn-sm">Filter</button>
+  <a class="btn btn-outline-secondary btn-sm"
+     href="{{ url_for('payroll_export_pdf', **{'from': period_from, 'to': period_to}) }}">
+    <i class="fa-solid fa-file-pdf"></i> Download this period (PDF, all staff)
+  </a>
+</form>
+
 {% if not history %}
-<p class="text-muted">No payments recorded yet.</p>
+<p class="text-muted">{{ 'No paid runs in that period.' if (period_from or period_to) else 'No payments recorded yet.' }}</p>
 {% else %}
 <table class="table table-sm bg-white">
   <thead><tr><th>Paid</th><th>Person</th><th>Period</th><th>Amount</th></tr></thead>

@@ -16,10 +16,11 @@ from functools import wraps
 import requests
 import stripe
 import anthropic
+from fpdf import FPDF
 from requests.auth import HTTPBasicAuth
 from flask import (
     Flask, g, render_template, request, redirect, url_for, flash, session, send_file,
-    send_from_directory
+    send_from_directory, Response
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -393,7 +394,25 @@ def _migrate(db):
     if not db.execute("SELECT id FROM users WHERE display_name = 'Rosie'").fetchone():
         db.execute(
             "INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, office_hourly_rate, active) "
-            "VALUES ('Rosie', 'delegate', 30.0, 33.0, 40.0, 1)"
+            "VALUES ('Rosie', 'delegate', 33.0, 33.0, 40.0, 1)"
+        )
+
+    # One-time: consolidated the separate $30/hr phone-task rate into the
+    # $33/hr off-office rate - one number for anything that isn't in-office,
+    # plus $40/hr for office time. Fixes anyone still on the old $30 tier,
+    # and recalculates any not-yet-paid amounts that were logged at that old
+    # rate so payroll reflects the corrected $33 uniformly. Already-paid
+    # history is left untouched. Gated so a future hire can still
+    # legitimately be set to exactly $30/hr without this silently undoing it.
+    if not db.execute("SELECT value FROM config WHERE key = 'phone_rate_consolidated_v1'").fetchone():
+        db.execute("UPDATE users SET hourly_rate = 33.0 WHERE hourly_rate = 30.0")
+        db.execute(
+            "UPDATE payments SET amount = ROUND(minutes / 60.0 * 33.0, 2) "
+            "WHERE payroll_run_id IS NULL AND reason IN ('time', 'phone_time') AND minutes IS NOT NULL"
+        )
+        db.execute(
+            "INSERT INTO config (key, value) VALUES ('phone_rate_consolidated_v1', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
     db.commit()
 
@@ -496,12 +515,20 @@ def _log_standalone_time(db, user, minutes, rate, reason, now):
     )
 
 
+PAYROLL_ONLY_ENDPOINTS = ('payroll', 'payroll_export_pdf', 'logout')
+
+
 @app.before_request
 def require_login():
     if request.endpoint is None or request.endpoint in (
         'login', 'static', 'service_worker', 'ask_form', 'ask_success', 'ask_webhook',
     ):
         return None
+    if session.get('payroll_only'):
+        if request.endpoint in PAYROLL_ONLY_ENDPOINTS:
+            return None
+        flash('This login only has access to Payroll.', 'warning')
+        return redirect(url_for('payroll'))
     if not session.get('user_id'):
         return redirect(url_for('login', next=request.path))
     return None
@@ -521,6 +548,21 @@ def admin_required(view):
             flash('That page is admin-only.', 'warning')
             return redirect(url_for('queue'))
         return view(*args, **kwargs)
+    return wrapped
+
+
+def payroll_access_required(view):
+    """Admin (Dr Tu/Sally) or the restricted Mediq Payroll login - anyone
+    else gets bounced. Individual mutating actions inside the view (adjust
+    an amount, delete an entry, change a pay rate) still check
+    session.get('payroll_only') themselves and refuse those specifically -
+    this decorator only gates getting into the page at all."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if session.get('payroll_only') or session.get('role') == 'admin':
+            return view(*args, **kwargs)
+        flash('That page is admin-only.', 'warning')
+        return redirect(url_for('queue'))
     return wrapped
 
 
@@ -577,6 +619,13 @@ def login():
             return redirect(url_for('login'))
 
         password = request.form.get('password', '')
+
+        payroll_hash = cfg('payroll_password_hash')
+        if payroll_hash and check_password_hash(payroll_hash, password):
+            session.clear()
+            session['payroll_only'] = True
+            return redirect(url_for('payroll'))
+
         user_id = request.form.get('user_id')
         user = db.execute('SELECT * FROM users WHERE id = ? AND active = 1', (user_id,)).fetchone()
         if user and check_password_hash(cfg('shared_password_hash'), password):
@@ -1870,9 +1919,10 @@ def log_time_page():
 
 
 @app.route('/admin/payroll', methods=['GET', 'POST'])
-@admin_required
+@payroll_access_required
 def payroll():
     db = get_db()
+    is_payroll_only = bool(session.get('payroll_only'))
     if request.method == 'POST':
         action = request.form.get('action', 'mark_paid')
 
@@ -1902,7 +1952,7 @@ def payroll():
                 db.commit()
                 flash(f'Marked ${total:.2f} as paid.', 'success')
 
-        elif action == 'adjust_payment':
+        elif action == 'adjust_payment' and not is_payroll_only:
             payment_id = request.form.get('payment_id')
             new_amount = request.form.get('amount', '').strip()
             try:
@@ -1920,7 +1970,7 @@ def payroll():
                 db.commit()
                 flash(f'Adjusted entry to ${new_amount:.2f}.', 'success')
 
-        elif action == 'delete_payment':
+        elif action == 'delete_payment' and not is_payroll_only:
             payment_id = request.form.get('payment_id')
             deleted = db.execute(
                 'DELETE FROM payments WHERE id = ? AND payroll_run_id IS NULL', (payment_id,)
@@ -1931,20 +1981,22 @@ def payroll():
             else:
                 flash('Could not find that entry - it may already be paid.', 'warning')
 
-        elif action == 'update_rates':
+        elif action == 'update_rates' and not is_payroll_only:
             user_id = request.form.get('user_id')
-            hourly_rate = request.form.get('hourly_rate', '').strip()
-            clinic_hourly_rate = request.form.get('clinic_hourly_rate', '').strip()
+            off_office_rate = request.form.get('off_office_rate', '').strip()
             office_hourly_rate = request.form.get('office_hourly_rate', '').strip()
-            hourly_rate_val = float(hourly_rate) if hourly_rate else None
-            clinic_hourly_rate_val = float(clinic_hourly_rate) if clinic_hourly_rate else None
+            off_office_rate_val = float(off_office_rate) if off_office_rate else None
             office_hourly_rate_val = float(office_hourly_rate) if office_hourly_rate else None
             db.execute(
                 'UPDATE users SET hourly_rate = ?, clinic_hourly_rate = ?, office_hourly_rate = ? WHERE id = ?',
-                (hourly_rate_val, clinic_hourly_rate_val, office_hourly_rate_val, user_id),
+                (off_office_rate_val, off_office_rate_val, office_hourly_rate_val, user_id),
             )
             db.commit()
             flash('Rates updated.', 'success')
+
+        elif is_payroll_only and action in ('adjust_payment', 'delete_payment', 'update_rates'):
+            flash('The Payroll login can view, export, and mark paid - only Dr Tu or Sally can adjust '
+                  'amounts, remove entries, or change pay rates.', 'warning')
 
         return redirect(url_for('payroll'))
 
@@ -1970,11 +2022,144 @@ def payroll():
             'count': row['n'],
             'entries': entries,
         })
-    history = db.execute(
-        "SELECT r.*, u.display_name FROM payroll_runs r JOIN users u ON u.id = r.user_id "
-        "ORDER BY r.paid_at DESC LIMIT 50"
-    ).fetchall()
-    return render_template('payroll.html', totals=totals, history=history)
+
+    period_from = request.args.get('from', '').strip()
+    period_to = request.args.get('to', '').strip()
+    history_query = (
+        "SELECT r.*, u.display_name FROM payroll_runs r JOIN users u ON u.id = r.user_id WHERE 1=1"
+    )
+    history_params = []
+    if period_from:
+        history_query += " AND r.paid_at >= ?"
+        history_params.append(period_from)
+    if period_to:
+        history_query += " AND r.paid_at <= ?"
+        history_params.append(period_to + 'T23:59:59')
+    history_query += " ORDER BY r.paid_at DESC LIMIT 200"
+    history = db.execute(history_query, history_params).fetchall()
+
+    return render_template('payroll.html', totals=totals, history=history, is_payroll_only=is_payroll_only,
+                            period_from=period_from, period_to=period_to)
+
+
+PAYMENT_REASON_LABELS = {
+    'time': 'Task work',
+    'phone_time': 'Off-office support hours',
+    'clinic_time': 'Off-office support hours',
+    'office_time': 'Office hours',
+}
+
+
+def _generate_payroll_pdf(period_from, period_to, target_user_id=None):
+    """With a date range: a report of already-paid runs in that window (what
+    an accountant needs for reconciliation/reporting). With no range: a
+    snapshot of what's currently owed but not yet paid."""
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    try:
+        sections = []
+        if period_from or period_to:
+            title_period = f"Paid runs: {period_from or 'earliest'} to {period_to or 'latest'}"
+            query = (
+                "SELECT r.*, u.display_name FROM payroll_runs r JOIN users u ON u.id = r.user_id WHERE 1=1"
+            )
+            params = []
+            if target_user_id:
+                query += " AND r.user_id = ?"
+                params.append(target_user_id)
+            if period_from:
+                query += " AND r.paid_at >= ?"
+                params.append(period_from)
+            if period_to:
+                query += " AND r.paid_at <= ?"
+                params.append(period_to + 'T23:59:59')
+            query += " ORDER BY u.display_name, r.paid_at"
+            for run in db.execute(query, params).fetchall():
+                entries = db.execute(
+                    "SELECT * FROM payments WHERE payroll_run_id = ? ORDER BY created_at", (run['id'],)
+                ).fetchall()
+                sections.append({
+                    'label': f"{run['display_name']} - paid {run['paid_at'][:10]}",
+                    'entries': entries,
+                    'total': run['total_amount'],
+                })
+        else:
+            title_period = f"Current unpaid summary - as of {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+            query = (
+                "SELECT id, display_name FROM users WHERE active = 1 AND (hourly_rate IS NOT NULL "
+                "OR clinic_hourly_rate IS NOT NULL OR office_hourly_rate IS NOT NULL)"
+            )
+            params = []
+            if target_user_id:
+                query += " AND id = ?"
+                params.append(target_user_id)
+            query += " ORDER BY display_name"
+            for u in db.execute(query, params).fetchall():
+                entries = db.execute(
+                    "SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL ORDER BY created_at",
+                    (u['id'],),
+                ).fetchall()
+                sections.append({
+                    'label': u['display_name'],
+                    'entries': entries,
+                    'total': sum(e['amount'] for e in entries),
+                })
+    finally:
+        db.close()
+
+    def pdf_safe(text):
+        """FPDF's core fonts only support latin-1 - replace anything outside
+        that range rather than crashing the export over an unexpected
+        character in a name or note."""
+        return str(text).encode('latin-1', errors='replace').decode('latin-1')
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font('Helvetica', 'B', 16)
+    pdf.cell(0, 10, 'Shore Gastroenterology - Payroll Report', new_x='LMARGIN', new_y='NEXT')
+    pdf.set_font('Helvetica', '', 11)
+    pdf.cell(0, 8, title_period, new_x='LMARGIN', new_y='NEXT')
+    pdf.ln(4)
+
+    grand_total = 0.0
+    for section in sections:
+        pdf.set_font('Helvetica', 'B', 13)
+        pdf.cell(0, 8, pdf_safe(section['label']), new_x='LMARGIN', new_y='NEXT')
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.cell(35, 6, 'Date', border=1)
+        pdf.cell(65, 6, 'Type', border=1)
+        pdf.cell(25, 6, 'Minutes', border=1)
+        pdf.cell(30, 6, 'Amount', border=1, new_x='LMARGIN', new_y='NEXT')
+        pdf.set_font('Helvetica', '', 9)
+        if not section['entries']:
+            pdf.cell(155, 6, 'No entries.', border=1, new_x='LMARGIN', new_y='NEXT')
+        for e in section['entries']:
+            pdf.cell(35, 6, e['created_at'][:10], border=1)
+            pdf.cell(65, 6, pdf_safe(PAYMENT_REASON_LABELS.get(e['reason'], e['reason'] or 'Task work')), border=1)
+            pdf.cell(25, 6, f"{e['minutes']:.0f}" if e['minutes'] else '-', border=1)
+            pdf.cell(30, 6, f"${e['amount']:.2f}", border=1, new_x='LMARGIN', new_y='NEXT')
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.cell(125, 7, '')
+        pdf.cell(30, 7, f"${section['total']:.2f}", border='T', new_x='LMARGIN', new_y='NEXT')
+        pdf.ln(6)
+        grand_total += section['total']
+
+    pdf.set_font('Helvetica', 'B', 12)
+    pdf.cell(0, 8, f'Grand total: ${grand_total:.2f}', new_x='LMARGIN', new_y='NEXT')
+    return bytes(pdf.output())
+
+
+@app.route('/admin/payroll/export.pdf')
+@payroll_access_required
+def payroll_export_pdf():
+    period_from = request.args.get('from', '').strip()
+    period_to = request.args.get('to', '').strip()
+    target_user_id = request.args.get('user_id', '').strip() or None
+    pdf_bytes = _generate_payroll_pdf(period_from, period_to, target_user_id)
+    filename = f"payroll_{period_from or 'unpaid'}_to_{period_to or 'now'}.pdf".replace('/', '-')
+    return Response(pdf_bytes, mimetype='application/pdf',
+                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 @app.route('/admin/users', methods=['GET', 'POST'])
@@ -1986,10 +2171,8 @@ def admin_users():
         if action == 'create':
             display_name = request.form.get('display_name', '').strip()
             role = request.form.get('role', 'actioneer')
-            rate = request.form.get('hourly_rate', '').strip()
-            rate_val = float(rate) if rate else None
-            clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
-            clinic_rate_val = float(clinic_rate) if clinic_rate else None
+            off_office_rate = request.form.get('off_office_rate', '').strip()
+            off_office_rate_val = float(off_office_rate) if off_office_rate else None
             office_rate = request.form.get('office_hourly_rate', '').strip()
             office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
@@ -1999,17 +2182,15 @@ def admin_users():
                 db.execute(
                     'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, '
                     'office_hourly_rate, phone_number) VALUES (?, ?, ?, ?, ?, ?)',
-                    (display_name, role, rate_val, clinic_rate_val, office_rate_val, phone or None),
+                    (display_name, role, off_office_rate_val, off_office_rate_val, office_rate_val, phone or None),
                 )
                 db.commit()
                 flash(f'Added {display_name}.', 'success')
         elif action == 'update':
             user_id = request.form.get('user_id')
             role = request.form.get('role', 'actioneer')
-            rate = request.form.get('hourly_rate', '').strip()
-            rate_val = float(rate) if rate else None
-            clinic_rate = request.form.get('clinic_hourly_rate', '').strip()
-            clinic_rate_val = float(clinic_rate) if clinic_rate else None
+            off_office_rate = request.form.get('off_office_rate', '').strip()
+            off_office_rate_val = float(off_office_rate) if off_office_rate else None
             office_rate = request.form.get('office_hourly_rate', '').strip()
             office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
@@ -2020,7 +2201,8 @@ def admin_users():
             db.execute(
                 'UPDATE users SET role = ?, hourly_rate = ?, clinic_hourly_rate = ?, office_hourly_rate = ?, '
                 'phone_number = ?, active = ?, is_doctor = ? WHERE id = ?',
-                (role, rate_val, clinic_rate_val, office_rate_val, phone or None, active, is_doctor, user_id),
+                (role, off_office_rate_val, off_office_rate_val, office_rate_val, phone or None, active,
+                 is_doctor, user_id),
             )
             db.commit()
             flash('User updated.', 'success')
@@ -2134,6 +2316,14 @@ def admin_settings():
             else:
                 set_cfg('shared_password_hash', generate_password_hash(new_password))
                 flash('Shared login password updated.', 'success')
+        elif action == 'change_payroll_password':
+            new_password = request.form.get('new_payroll_password', '')
+            confirm = request.form.get('new_payroll_password_confirm', '')
+            if not new_password or new_password != confirm:
+                flash('Passwords must match and not be empty.', 'danger')
+            else:
+                set_cfg('payroll_password_hash', generate_password_hash(new_password))
+                flash('Payroll login password set.', 'success')
         elif action == 'send_test_email':
             test_to = request.form.get('test_email_to', '').strip()
             if not test_to:
@@ -2191,6 +2381,7 @@ def admin_settings():
         has_stripe_secret_key=bool(cfg('stripe_secret_key')),
         has_stripe_webhook_secret=bool(cfg('stripe_webhook_secret')),
         has_anthropic_key=bool(cfg('anthropic_api_key')),
+        has_payroll_password=bool(cfg('payroll_password_hash')),
     )
 
 

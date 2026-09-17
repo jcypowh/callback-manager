@@ -4,14 +4,15 @@
 <h3 class="mb-3">Users</h3>
 <p class="text-muted">Everyone shares one login password (set/changed under Settings). This controls
 who shows up in the "who are you" picker, their role, and their pay — editable by you or Sally.
-<strong>Hourly rate</strong> is what they're paid, worked out from the minutes they log against
-each task (e.g. 13 min at $30/hr = $6.50) — covers <em>every</em> logged attempt, completion, and
-hand-back, not just successes. Leave blank for no payment (e.g. Sally and Dr Tu aren't paid per
-task). <strong>Phone</strong> is where urgent SMS notifications go. <strong>Is doctor</strong>
+<strong>Off-office rate</strong> covers both per-task minutes logged against a callback (e.g. 13
+min at $33/hr = $7.15) and standalone off-office support hours — covers <em>every</em> logged
+attempt, completion, and hand-back, not just successes. <strong>Office rate</strong> is for time
+logged as being with Dr Tu in-office. Leave blank for no payment (e.g. Sally and Dr Tu aren't paid).
+<strong>Phone</strong> is where urgent SMS notifications go. <strong>Is doctor</strong>
 controls who "Forward to Dr Tu" actually goes to — only one person can be it at a time.</p>
 
 <table class="table table-sm bg-white align-middle mb-4">
-  <thead><tr><th>Name</th><th>Role</th><th>Phone rate ($/hr)</th><th>Off-office rate ($/hr)</th><th>Office rate ($/hr)</th><th>Phone</th><th>Is doctor</th><th>Active</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>Role</th><th>Off-office rate ($/hr)</th><th>Office rate ($/hr)</th><th>Phone</th><th>Is doctor</th><th>Active</th><th></th></tr></thead>
   <tbody>
     {% for u in users %}
     <form id="update-{{ u.id }}" method="post">
@@ -27,8 +28,7 @@ controls who "Forward to Dr Tu" actually goes to — only one person can be it a
           <option value="delegate" {% if u.role == 'delegate' %}selected{% endif %}>delegate (assigned only)</option>
         </select>
       </td>
-      <td><input type="number" step="0.01" name="hourly_rate" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.hourly_rate if u.hourly_rate is not none else '' }}" style="width:100px;"></td>
-      <td><input type="number" step="0.01" name="clinic_hourly_rate" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.clinic_hourly_rate if u.clinic_hourly_rate is not none else '' }}" style="width:100px;"></td>
+      <td><input type="number" step="0.01" name="off_office_rate" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.clinic_hourly_rate if u.clinic_hourly_rate is not none else (u.hourly_rate if u.hourly_rate is not none else '') }}" style="width:100px;"></td>
       <td><input type="number" step="0.01" name="office_hourly_rate" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.office_hourly_rate if u.office_hourly_rate is not none else '' }}" style="width:100px;"></td>
       <td><input type="tel" name="phone_number" form="update-{{ u.id }}" class="form-control form-control-sm" value="{{ u.phone_number or '' }}" placeholder="04xx xxx xxx" style="width:130px;"></td>
       <td><input type="checkbox" name="is_doctor" form="update-{{ u.id }}" class="form-check-input" {% if u.is_doctor %}checked{% endif %}></td>
@@ -57,12 +57,8 @@ controls who "Forward to Dr Tu" actually goes to — only one person can be it a
     </select>
   </div>
   <div class="col-auto">
-    <label class="form-label">Phone rate ($/hr)</label>
-    <input type="number" step="0.01" name="hourly_rate" class="form-control" style="width:120px;">
-  </div>
-  <div class="col-auto">
     <label class="form-label">Off-office rate ($/hr)</label>
-    <input type="number" step="0.01" name="clinic_hourly_rate" class="form-control" style="width:120px;">
+    <input type="number" step="0.01" name="off_office_rate" class="form-control" style="width:120px;">
   </div>
   <div class="col-auto">
     <label class="form-label">Office rate ($/hr)</label>

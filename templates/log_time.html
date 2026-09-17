@@ -11,17 +11,6 @@
 </div>
 
 <div class="d-flex flex-wrap gap-3 mb-4">
-  {% if user.hourly_rate %}
-  <form method="post" class="card p-3" style="max-width:280px;">
-    <input type="hidden" name="kind" value="phone">
-    <h5 class="mb-1">Telephone task time</h5>
-    <p class="text-muted small mb-2">${{ '%.2f'|format(user.hourly_rate) }}/hr</p>
-    <label class="form-label">Minutes</label>
-    <input type="number" step="0.01" min="0" name="minutes" class="form-control mb-2" placeholder="e.g. 13" required>
-    <button class="btn btn-primary">Log</button>
-  </form>
-  {% endif %}
-
   {% if user.clinic_hourly_rate %}
   <form method="post" class="card p-3" style="max-width:280px;">
     <input type="hidden" name="kind" value="clinic">
@@ -56,9 +45,8 @@
     <tr>
       <td class="text-nowrap small text-muted">{{ p.created_at[:16].replace('T', ' ') }}</td>
       <td>
-        {% if p.reason == 'clinic_time' %}Off-office support hours
+        {% if p.reason in ('clinic_time', 'phone_time') %}Off-office support hours
         {% elif p.reason == 'office_time' %}Office hours
-        {% elif p.reason == 'phone_time' %}Telephone task time
         {% elif p.task_id %}Task work
         {% else %}{{ p.reason }}{% endif %}
       </td>
