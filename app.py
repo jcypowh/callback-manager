@@ -264,7 +264,8 @@ CREATE TABLE IF NOT EXISTS fax_documents (
     ai_analyzed_at TEXT,
     source TEXT NOT NULL DEFAULT 'fax',
     from_address TEXT,
-    subject TEXT
+    subject TEXT,
+    dismissed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS paid_questions (
@@ -339,7 +340,8 @@ def _migrate(db):
     existing_fax_cols = {row['name'] for row in db.execute('PRAGMA table_info(fax_documents)').fetchall()}
     for col, decl in [('ai_category', 'TEXT'), ('ai_patient_name', 'TEXT'),
                        ('ai_suggested_action', 'TEXT'), ('ai_reasoning', 'TEXT'),
-                       ('ai_analyzed_at', 'TEXT'), ('from_address', 'TEXT'), ('subject', 'TEXT')]:
+                       ('ai_analyzed_at', 'TEXT'), ('from_address', 'TEXT'), ('subject', 'TEXT'),
+                       ('dismissed_at', 'TEXT')]:
         if col not in existing_fax_cols:
             db.execute(f'ALTER TABLE fax_documents ADD COLUMN {col} {decl}')
     if 'source' not in existing_fax_cols:
@@ -534,7 +536,7 @@ def inject_globals():
         ).fetchall()
         if user['role'] in FULL_ACCESS_ROLES:
             unfiled_fax_count = get_db().execute(
-                "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL"
+                "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL AND dismissed_at IS NULL"
             ).fetchone()['n']
             pending_paid_qa_count = get_db().execute(
                 "SELECT COUNT(*) AS n FROM paid_questions WHERE status = 'pending_review'"
@@ -859,7 +861,7 @@ def queue():
         filed_task_ids = {
             row['linked_task_id'] for row in db.execute(
                 f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders}) '
-                'AND category IS NOT NULL',
+                'AND category IS NOT NULL AND dismissed_at IS NULL',
                 attachment_task_ids,
             ).fetchall()
         }
@@ -1186,7 +1188,8 @@ def _get_or_create_task_fax_row(db, task):
     place it) instead of copying the PDF into FAX_DIR a second time. Returns
     None if there's no attachment file to copy."""
     fax = db.execute(
-        'SELECT * FROM fax_documents WHERE linked_task_id = ? AND category IS NULL', (task['id'],)
+        'SELECT * FROM fax_documents WHERE linked_task_id = ? AND category IS NULL AND dismissed_at IS NULL',
+        (task['id'],),
     ).fetchone()
     if fax:
         return fax
@@ -1225,7 +1228,8 @@ def file_task_referral(task_id):
         flash('This task has no referral document attached to file.', 'warning')
         return redirect(back)
     already = db.execute(
-        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL', (task_id,)
+        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL AND dismissed_at IS NULL',
+        (task_id,),
     ).fetchone()
     if already:
         flash('This referral has already been filed.', 'warning')
@@ -1267,7 +1271,8 @@ def ai_file_task_referral(task_id):
         flash('This task has no document attached to file.', 'warning')
         return redirect(back)
     already = db.execute(
-        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL', (task_id,)
+        'SELECT id FROM fax_documents WHERE linked_task_id = ? AND category IS NOT NULL AND dismissed_at IS NULL',
+        (task_id,),
     ).fetchone()
     if already:
         flash('This has already been filed.', 'warning')
@@ -1751,7 +1756,7 @@ def archive():
         filed_task_ids = {
             row['linked_task_id'] for row in db.execute(
                 f'SELECT linked_task_id FROM fax_documents WHERE linked_task_id IN ({placeholders}) '
-                'AND category IS NOT NULL',
+                'AND category IS NOT NULL AND dismissed_at IS NULL',
                 attachment_task_ids,
             ).fetchall()
         }
@@ -2369,10 +2374,11 @@ def fax_inbox_page():
         return redirect(url_for('queue'))
     db = get_db()
     unfiled = db.execute(
-        "SELECT * FROM fax_documents WHERE category IS NULL ORDER BY received_at ASC"
+        "SELECT * FROM fax_documents WHERE category IS NULL AND dismissed_at IS NULL ORDER BY received_at ASC"
     ).fetchall()
     recently_filed = db.execute(
-        "SELECT * FROM fax_documents WHERE filed_at IS NOT NULL ORDER BY filed_at DESC LIMIT 20"
+        "SELECT * FROM fax_documents WHERE filed_at IS NOT NULL AND dismissed_at IS NULL "
+        "ORDER BY filed_at DESC LIMIT 20"
     ).fetchall()
     targets = db.execute(
         "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
@@ -2390,7 +2396,7 @@ def fax_archive_page():
     db = get_db()
     q = request.args.get('q', '').strip()
     cat = request.args.get('cat', '').strip()
-    query = "SELECT * FROM fax_documents WHERE category IS NOT NULL"
+    query = "SELECT * FROM fax_documents WHERE category IS NOT NULL AND dismissed_at IS NULL"
     params = []
     if cat in FAX_CATEGORIES:
         query += " AND category = ?"
@@ -2401,7 +2407,8 @@ def fax_archive_page():
     query += " ORDER BY filed_at DESC LIMIT 200"
     filed = db.execute(query, params).fetchall()
     missing_name_count = db.execute(
-        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL AND (patient_name IS NULL OR patient_name = '')"
+        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL AND dismissed_at IS NULL "
+        "AND (patient_name IS NULL OR patient_name = '')"
     ).fetchone()['n']
     return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q, cat=cat,
                             missing_name_count=missing_name_count, has_ai_key=bool(cfg('anthropic_api_key')),
@@ -2427,10 +2434,14 @@ def view_fax(fax_id):
 
 @app.route('/fax-inbox/<int:fax_id>/delete', methods=['POST'])
 def delete_fax(fax_id):
-    """Deletes a fax/email/task document entirely - for junk that got caught
-    by the broad email-attachment net, or a filed entry that was a mistake.
-    Does not touch any task it may have created (deleting the archive entry
-    is independent of the callback task itself)."""
+    """Removes a fax/email/task document from every list in the app - for
+    junk that got caught by the broad email-attachment net, or a filed entry
+    that was a mistake. This is a soft delete: the row (and its
+    gmail_message_id, for email/fax-sourced ones) stays in the database so
+    the poller never re-imports the same message again, even though it's
+    gone from view everywhere. Does not touch any task it may have created
+    (deleting the archive entry is independent of the callback task itself,
+    which becomes eligible to be filed again)."""
     if session.get('role') not in FULL_ACCESS_ROLES:
         flash('Only Dr Tu or Sally can delete documents.', 'warning')
         return redirect(url_for('fax_inbox_page'))
@@ -2440,9 +2451,10 @@ def delete_fax(fax_id):
         flash('Document not found.', 'warning')
         return redirect(url_for('fax_inbox_page'))
     was_filed = fax['category'] is not None
-    if fax['pdf_filename']:
-        (FAX_DIR / fax['pdf_filename']).unlink(missing_ok=True)
-    db.execute('DELETE FROM fax_documents WHERE id = ?', (fax_id,))
+    db.execute(
+        'UPDATE fax_documents SET dismissed_at = ? WHERE id = ?',
+        (datetime.now(timezone.utc).isoformat(), fax_id),
+    )
     db.commit()
     flash('Document deleted.', 'success')
     return redirect(url_for('fax_archive_page') if was_filed else url_for('fax_inbox_page'))
@@ -2600,7 +2612,8 @@ def ai_file_all_fax():
         return redirect(url_for('fax_inbox_page'))
     db = get_db()
     batch = db.execute(
-        "SELECT * FROM fax_documents WHERE category IS NULL ORDER BY received_at ASC LIMIT ?",
+        "SELECT * FROM fax_documents WHERE category IS NULL AND dismissed_at IS NULL "
+        "ORDER BY received_at ASC LIMIT ?",
         (AI_BATCH_SIZE,),
     ).fetchall()
     if not batch:
@@ -2614,7 +2627,9 @@ def ai_file_all_fax():
             filed += 1
     db.commit()
 
-    remaining = db.execute("SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL").fetchone()['n']
+    remaining = db.execute(
+        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NULL AND dismissed_at IS NULL"
+    ).fetchone()['n']
     msg = f'AI ran on {len(batch)}: {filed} filed, {len(batch) - filed} left for manual review.'
     if remaining:
         msg += f' {remaining} still unfiled — click again for the next batch.'
@@ -2661,8 +2676,8 @@ def ai_fill_archive_names():
         return redirect(url_for('fax_archive_page'))
     db = get_db()
     batch = db.execute(
-        "SELECT * FROM fax_documents WHERE category IS NOT NULL AND (patient_name IS NULL OR patient_name = '') "
-        "ORDER BY filed_at ASC LIMIT ?",
+        "SELECT * FROM fax_documents WHERE category IS NOT NULL AND dismissed_at IS NULL "
+        "AND (patient_name IS NULL OR patient_name = '') ORDER BY filed_at ASC LIMIT ?",
         (AI_BATCH_SIZE,),
     ).fetchall()
     if not batch:
@@ -2676,7 +2691,7 @@ def ai_fill_archive_names():
     db.commit()
 
     remaining = db.execute(
-        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL "
+        "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL AND dismissed_at IS NULL "
         "AND (patient_name IS NULL OR patient_name = '')"
     ).fetchone()['n']
     msg = f'AI ran on {len(batch)}: found a name for {found}, {len(batch) - found} still blank.'
