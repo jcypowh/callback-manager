@@ -33,9 +33,10 @@
 <p class="text-muted">{{ 'No matches.' if (q or cat) else 'Nothing filed yet.' }}</p>
 {% else %}
 <table class="table table-sm bg-white align-middle">
-  <thead><tr><th>Filed</th><th>Patient</th><th>Category</th><th>Source</th><th>Notes</th><th></th></tr></thead>
+  <thead><tr><th>Filed</th><th>Patient</th><th>Category</th><th>Source</th><th>Notes</th><th>Booking status</th><th></th></tr></thead>
   <tbody>
     {% for f in faxes %}
+    {% set info = task_info.get(f.linked_task_id) %}
     <tr>
       <td class="text-nowrap small text-muted">{{ f.filed_at[:16].replace('T', ' ') if f.filed_at else '' }}</td>
       <td>{% if f.patient_name %}{{ f.patient_name }}{% else %}<span class="badge bg-warning text-dark">No name</span>{% endif %}</td>
@@ -44,6 +45,27 @@
         {% if f.source == 'email' %}Email{% elif f.source == 'task' %}Callback task{% else %}Fax{% endif %}
       </td>
       <td class="small">{{ f.notes or '' }}</td>
+      <td class="small">
+        {% if not info %}
+        <span class="text-muted">—</span>
+        {% elif info.status == 'done' %}
+        <span class="badge bg-success">Actioned</span>
+        {% else %}
+          {% if info.status == 'claimed' %}
+          <div class="mb-1">Claimed by {{ info.claimed_by_name }}</div>
+          {% else %}
+          <div class="mb-1"><span class="badge bg-warning text-dark">Unclaimed</span></div>
+          {% endif %}
+          <form method="post" action="{{ url_for('handoff_task', task_id=f.linked_task_id) }}" class="d-flex gap-1">
+            <select name="target_id" class="form-select form-select-sm" style="max-width:130px;">
+              {% for t in assign_targets %}
+              <option value="{{ t.id }}">{{ t.display_name }}</option>
+              {% endfor %}
+            </select>
+            <button class="btn btn-sm btn-outline-primary">Assign</button>
+          </form>
+        {% endif %}
+      </td>
       <td class="text-nowrap">
         <a href="{{ url_for('view_fax', fax_id=f.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View PDF</a>
         <form method="post" action="{{ url_for('delete_fax', fax_id=f.id) }}" class="d-inline"

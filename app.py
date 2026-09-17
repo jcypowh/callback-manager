@@ -959,14 +959,15 @@ def set_urgency(task_id):
 
 @app.route('/task/<int:task_id>/handoff', methods=['POST'])
 def handoff_task(task_id):
+    back = request.referrer or url_for('queue')
     db = get_db()
     task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
     if not task or task['status'] == 'done':
         flash('That task is already resolved.', 'warning')
-        return redirect(url_for('queue'))
+        return redirect(back)
     if not _can_manage_task(task):
         flash('That task is not assigned to you.', 'warning')
-        return redirect(url_for('queue'))
+        return redirect(back)
 
     user = current_user()
     target_id = request.form.get('target_id')
@@ -974,10 +975,10 @@ def handoff_task(task_id):
     target = db.execute("SELECT * FROM users WHERE id = ? AND active = 1", (target_id,)).fetchone()
     if not target:
         flash('Choose who to hand this off to.', 'warning')
-        return redirect(url_for('queue'))
+        return redirect(back)
     if user['role'] == 'delegate' and target['role'] not in FULL_ACCESS_ROLES:
         flash('You can only hand off to Dr Tu or Sally.', 'warning')
-        return redirect(url_for('queue'))
+        return redirect(back)
 
     # Anti-ping-pong: a delegate must have logged at least one real attempt on
     # this task before handing it off - stops "claim, bounce, claim, bounce"
@@ -989,12 +990,12 @@ def handoff_task(task_id):
         ).fetchone()['n']
         if not logged:
             flash('Log at least one attempt first (what you tried) before handing this off.', 'warning')
-            return redirect(url_for('queue'))
+            return redirect(back)
 
     minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
     if error:
         flash(error, 'warning')
-        return redirect(url_for('queue'))
+        return redirect(back)
 
     urgency = request.form.get('urgency', '').strip()
     set_urgency_now = user['role'] in FULL_ACCESS_ROLES and urgency in URGENCY_LEVELS
@@ -1025,7 +1026,7 @@ def handoff_task(task_id):
     db.commit()
     paid_note = f' ({minutes_val:g} min logged)' if minutes_val else ''
     flash(f"Handed off to {target['display_name']}{paid_note}.", 'success')
-    return redirect(url_for('queue'))
+    return redirect(back)
 
 
 @app.route('/task/<int:task_id>/notify-urgent', methods=['POST'])
@@ -2410,9 +2411,24 @@ def fax_archive_page():
         "SELECT COUNT(*) AS n FROM fax_documents WHERE category IS NOT NULL AND dismissed_at IS NULL "
         "AND (patient_name IS NULL OR patient_name = '')"
     ).fetchone()['n']
+
+    linked_task_ids = [f['linked_task_id'] for f in filed if f['linked_task_id']]
+    task_info = {}
+    if linked_task_ids:
+        placeholders = ','.join('?' * len(linked_task_ids))
+        for row in db.execute(
+            f'SELECT t.id, t.status, u.display_name AS claimed_by_name FROM tasks t '
+            f'LEFT JOIN users u ON u.id = t.claimed_by_id WHERE t.id IN ({placeholders})',
+            linked_task_ids,
+        ).fetchall():
+            task_info[row['id']] = {'status': row['status'], 'claimed_by_name': row['claimed_by_name']}
+    assign_targets = db.execute(
+        "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"
+    ).fetchall()
+
     return render_template('fax_archive.html', faxes=filed, categories=FAX_CATEGORIES, q=q, cat=cat,
                             missing_name_count=missing_name_count, has_ai_key=bool(cfg('anthropic_api_key')),
-                            ai_batch_size=AI_BATCH_SIZE)
+                            ai_batch_size=AI_BATCH_SIZE, task_info=task_info, assign_targets=assign_targets)
 
 
 @app.route('/fax-inbox/<int:fax_id>/view')
