@@ -48,21 +48,25 @@
       <td class="small">
         {% if not info %}
         <span class="text-muted">—</span>
-        {% elif info.status == 'done' %}
-        <span class="badge bg-success">Actioned</span>
         {% else %}
-          {% if info.status == 'claimed' %}
+          {% if info.status == 'done' %}
+          <div class="mb-1"><span class="badge bg-success">Actioned</span></div>
+          <form method="post" action="{{ url_for('reassign_actioned_task', task_id=f.linked_task_id) }}"
+                class="d-flex gap-1"
+                onsubmit="return confirm('This reopens the resolved task and hands it to whoever you pick - continue?');">
+          {% elif info.status == 'claimed' %}
           <div class="mb-1">Claimed by {{ info.claimed_by_name }}</div>
+          <form method="post" action="{{ url_for('handoff_task', task_id=f.linked_task_id) }}" class="d-flex gap-1">
           {% else %}
           <div class="mb-1"><span class="badge bg-warning text-dark">Unclaimed</span></div>
-          {% endif %}
           <form method="post" action="{{ url_for('handoff_task', task_id=f.linked_task_id) }}" class="d-flex gap-1">
+          {% endif %}
             <select name="target_id" class="form-select form-select-sm" style="max-width:130px;">
               {% for t in assign_targets %}
               <option value="{{ t.id }}">{{ t.display_name }}</option>
               {% endfor %}
             </select>
-            <button class="btn btn-sm btn-outline-primary">Assign</button>
+            <button class="btn btn-sm btn-outline-primary">{{ 'Reassign' if info.status == 'done' else 'Assign' }}</button>
           </form>
         {% endif %}
       </td>

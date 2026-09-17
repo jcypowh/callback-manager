@@ -1730,6 +1730,54 @@ def reopen_task(task_id):
     return redirect(url_for('queue'))
 
 
+@app.route('/task/<int:task_id>/reassign-actioned', methods=['POST'])
+def reassign_actioned_task(task_id):
+    """Reopens an already-resolved task and hands it straight to someone in
+    one step - for the Document Archive's 'Actioned' referrals that still
+    need a second look (e.g. checking a booking actually went through).
+    Same payroll-safety guard as the plain Reopen: refuses if the original
+    payment has already gone out in a paid run."""
+    back = request.referrer or url_for('queue')
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can reassign an already-actioned task.', 'warning')
+        return redirect(back)
+    db = get_db()
+    task = db.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or task['status'] != 'done':
+        flash('That task is not archived.', 'warning')
+        return redirect(back)
+    already_paid = db.execute(
+        'SELECT COUNT(*) AS n FROM payments WHERE task_id = ? AND payroll_run_id IS NOT NULL',
+        (task_id,),
+    ).fetchone()['n']
+    if already_paid:
+        flash("Can't reassign — a payment for this has already been included in a paid payroll run.", 'danger')
+        return redirect(back)
+    target_id = request.form.get('target_id')
+    target = db.execute("SELECT * FROM users WHERE id = ? AND active = 1", (target_id,)).fetchone()
+    if not target:
+        flash('Choose who to assign this to.', 'warning')
+        return redirect(back)
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute('DELETE FROM payments WHERE task_id = ? AND payroll_run_id IS NULL', (task_id,))
+    db.execute(
+        "UPDATE tasks SET status = 'claimed', claimed_by_id = ?, claimed_at = ?, "
+        "outcome_type = NULL, outcome_note = NULL, actioned_by_id = NULL, actioned_at = NULL, "
+        "doctor_handled_at = NULL, doctor_handled_by_id = NULL WHERE id = ?",
+        (target['id'], now, task_id),
+    )
+    db.execute(
+        'INSERT INTO task_notes (task_id, author_id, created_at, note) VALUES (?, ?, ?, ?)',
+        (task_id, session['user_id'], now,
+         f"Reopened and reassigned to {target['display_name']} by {session.get('display_name')} — "
+         f"was previously resolved as \"{OUTCOME_LABELS.get(task['outcome_type'], task['outcome_type'])}\"."),
+    )
+    db.commit()
+    flash(f"Reassigned to {target['display_name']}.", 'success')
+    return redirect(back)
+
+
 @app.route('/archive')
 def archive():
     db = get_db()
