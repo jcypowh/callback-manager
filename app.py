@@ -10,7 +10,8 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from pathlib import Path
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 from functools import wraps
 
 import requests
@@ -165,6 +166,7 @@ CREATE TABLE IF NOT EXISTS users (
     hourly_rate REAL,
     clinic_hourly_rate REAL,
     office_hourly_rate REAL,
+    abn TEXT,
     phone_number TEXT,
     is_doctor INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1
@@ -216,7 +218,11 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
     period_start TEXT,
     period_end TEXT,
     total_amount REAL,
-    paid_at TEXT
+    paid_at TEXT,
+    pay_date TEXT,
+    employer_name TEXT,
+    employer_abn TEXT,
+    worker_abn TEXT
 );
 
 CREATE TABLE IF NOT EXISTS payments (
@@ -327,6 +333,13 @@ def _migrate(db):
         db.execute('ALTER TABLE users ADD COLUMN clinic_hourly_rate REAL')
     if 'office_hourly_rate' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN office_hourly_rate REAL')
+    if 'abn' not in existing_user_cols:
+        db.execute('ALTER TABLE users ADD COLUMN abn TEXT')
+
+    existing_run_cols = {row['name'] for row in db.execute('PRAGMA table_info(payroll_runs)').fetchall()}
+    for col in ('pay_date', 'employer_name', 'employer_abn', 'worker_abn'):
+        if col not in existing_run_cols:
+            db.execute(f'ALTER TABLE payroll_runs ADD COLUMN {col} TEXT')
     if 'phone_number' not in existing_user_cols:
         db.execute('ALTER TABLE users ADD COLUMN phone_number TEXT')
 
@@ -515,7 +528,8 @@ def _log_standalone_time(db, user, minutes, rate, reason, now):
     )
 
 
-PAYROLL_ONLY_ENDPOINTS = ('payroll', 'payroll_export_pdf', 'logout')
+PAYROLL_ONLY_ENDPOINTS = ('payroll', 'payroll_export_pdf', 'payroll_slip', 'payroll_slip_run',
+                          'payroll_slip_pdf', 'logout')
 
 
 @app.before_request
@@ -1923,39 +1937,275 @@ def log_time_page():
 # doctor's own "My tasks" box like any other hand-off, so it's gone.)
 
 
+# ---------- pay slips (fortnightly, Sunday to Saturday, Sydney time) ----------
+# A pay slip is a fortnight's worth of one person's payments. Unpaid slips are
+# worked out on the fly from payments that haven't been paid yet - nothing is
+# stored until someone clicks Paid, which files a payroll_runs row (the filed
+# slip) and links that fortnight's payments to it.
+
+SYDNEY_TZ = ZoneInfo('Australia/Sydney')
+ON_DUTY_REASONS = ('office_time',)   # in-office time; everything else is off-site
+DEFAULT_PAY_PERIOD_ANCHOR = '2026-09-27'   # a Sunday that starts a fortnight
+
+
+def _pay_period_anchor():
+    try:
+        return date.fromisoformat(cfg('payperiod_anchor', DEFAULT_PAY_PERIOD_ANCHOR))
+    except ValueError:
+        return date.fromisoformat(DEFAULT_PAY_PERIOD_ANCHOR)
+
+
+def _local_date(created_at):
+    dt = datetime.fromisoformat(created_at)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SYDNEY_TZ).date()
+
+
+def _period_for(day, anchor):
+    """The fortnight (Sunday .. following-following Saturday) containing day."""
+    start = anchor + timedelta(days=14 * ((day - anchor).days // 14))
+    return start, start + timedelta(days=13)
+
+
+def _first_tuesday_after(day):
+    ahead = (1 - day.weekday()) % 7
+    return day + timedelta(days=ahead or 7)
+
+
+def _fmt_day(day):
+    return f'{day.strftime("%a")} {day.day} {day.strftime("%b %Y")}'
+
+
+def _fmt_hm(minutes):
+    total = int(round(minutes or 0))
+    return f'{total // 60}:{total % 60:02d}'
+
+
+def _slip_totals(entries):
+    off_min = off_amt = on_min = on_amt = 0.0
+    for e in entries:
+        if e['reason'] in ON_DUTY_REASONS:
+            on_min += e['minutes'] or 0
+            on_amt += e['amount']
+        else:
+            off_min += e['minutes'] or 0
+            off_amt += e['amount']
+    return {
+        'off_min': off_min, 'off_amt': round(off_amt, 2),
+        'on_min': on_min, 'on_amt': round(on_amt, 2),
+        'total': round(off_amt + on_amt, 2),
+    }
+
+
+def _employer_details():
+    return (cfg('payslip_business_name') or 'Shore Gastroenterology', cfg('payslip_abn') or '')
+
+
+def _unpaid_slips(db, user_id):
+    """One slip per fortnight that has unpaid entries, oldest first."""
+    anchor = _pay_period_anchor()
+    today = datetime.now(SYDNEY_TZ).date()
+    groups = {}
+    for r in db.execute(
+        'SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL ORDER BY created_at',
+        (user_id,),
+    ).fetchall():
+        start, _ = _period_for(_local_date(r['created_at']), anchor)
+        groups.setdefault(start, []).append(r)
+    slips = []
+    for start in sorted(groups):
+        end = start + timedelta(days=13)
+        slips.append({
+            'paid': False,
+            'user_id': user_id,
+            'period_start': start,
+            'period_end': end,
+            'entries': groups[start],
+            'is_open': end >= today,
+            'default_pay_date': _first_tuesday_after(end),
+            'supplementary': bool(db.execute(
+                'SELECT 1 FROM payroll_runs WHERE user_id = ? AND period_start = ?',
+                (user_id, start.isoformat()),
+            ).fetchone()),
+            **_slip_totals(groups[start]),
+        })
+    return slips
+
+
+def _paid_slip(db, run):
+    """A filed slip, built from its payroll run and the payments linked to it.
+    Runs filed before pay slips existed have no employer snapshot or pay date,
+    so those fall back to today's settings."""
+    entries = db.execute(
+        'SELECT * FROM payments WHERE payroll_run_id = ? ORDER BY created_at', (run['id'],)
+    ).fetchall()
+    name, abn = _employer_details()
+    return {
+        'paid': True,
+        'run': run,
+        'user_id': run['user_id'],
+        'period_start': date.fromisoformat(run['period_start'][:10]),
+        'period_end': date.fromisoformat(run['period_end'][:10]),
+        'entries': entries,
+        'pay_date': date.fromisoformat(run['pay_date']) if run['pay_date'] else None,
+        'paid_at': run['paid_at'],
+        'employer_name': run['employer_name'] or name,
+        'employer_abn': run['employer_abn'] or abn,
+        'worker_abn': run['worker_abn'],
+        **_slip_totals(entries),
+    }
+
+
+def _slip_header_details(db, slip):
+    """Fills in who a slip is for and who it's from, ready to display/print."""
+    user = db.execute('SELECT * FROM users WHERE id = ?', (slip['user_id'],)).fetchone()
+    slip['user'] = user
+    if not slip['paid']:
+        name, abn = _employer_details()
+        slip['employer_name'], slip['employer_abn'] = name, abn
+        slip['worker_abn'] = user['abn'] if user else None
+        slip['pay_date'] = slip['default_pay_date']
+    slip['slip_no'] = f"PS-{slip['run']['id']:05d}" if slip['paid'] else 'DRAFT'
+    return slip
+
+
+def _effective_rate(amount, minutes):
+    return amount / (minutes / 60.0) if minutes else None
+
+
+def _build_payslip_pdf(slip):
+    def safe(text):
+        return str(text).encode('latin-1', errors='replace').decode('latin-1')
+
+    pdf = FPDF(format='A4')
+    pdf.set_margins(15, 15, 15)
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    pdf.set_fill_color(33, 37, 41)
+    pdf.rect(0, 0, 210, 32, 'F')
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(15, 9)
+    pdf.set_font('Helvetica', 'B', 22)
+    pdf.cell(90, 10, 'PAY SLIP')
+    pdf.set_font('Helvetica', 'B', 13)
+    pdf.cell(90, 7, safe(slip['employer_name']), align='R', new_x='LMARGIN', new_y='NEXT')
+    pdf.set_x(105)
+    pdf.set_font('Helvetica', 'B', 15)
+    abn_text = f"ABN {slip['employer_abn']}" if slip['employer_abn'] else 'ABN not set'
+    pdf.cell(90, 8, safe(abn_text), align='R')
+    pdf.set_text_color(0, 0, 0)
+
+    pdf.set_xy(15, 40)
+    pdf.set_font('Helvetica', 'B', 9)
+    pdf.set_text_color(110, 117, 124)
+    pdf.cell(90, 5, 'EMPLOYEE')
+    pdf.cell(90, 5, 'PAY DETAILS', new_x='LMARGIN', new_y='NEXT')
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font('Helvetica', 'B', 13)
+    pdf.cell(90, 7, safe(slip['user']['display_name'] if slip['user'] else ''))
+    pdf.set_font('Helvetica', '', 10)
+    period_text = f"Pay period: {_fmt_day(slip['period_start'])} to {_fmt_day(slip['period_end'])}"
+    pdf.cell(90, 7, safe(period_text), new_x='LMARGIN', new_y='NEXT')
+    worker_line = f"ABN {slip['worker_abn']}" if slip.get('worker_abn') else ''
+    pdf.cell(90, 6, safe(worker_line))
+    pay_date_text = _fmt_day(slip['pay_date']) if slip.get('pay_date') else 'To be confirmed'
+    pdf.cell(90, 6, safe(f'Pay date: {pay_date_text}'), new_x='LMARGIN', new_y='NEXT')
+    pdf.cell(90, 6, '')
+    status = 'PAID' if slip['paid'] else 'NOT YET PAID (draft)'
+    pdf.cell(90, 6, safe(f"Slip no: {slip['slip_no']}   Status: {status}"), new_x='LMARGIN', new_y='NEXT')
+    pdf.ln(6)
+
+    pdf.set_fill_color(233, 236, 239)
+    pdf.set_font('Helvetica', 'B', 10)
+    for width, label, align in ((80, 'Description', 'L'), (25, 'Minutes', 'R'), (25, 'Hours', 'R'),
+                                 (25, 'Rate / hr', 'R'), (25, 'Amount', 'R')):
+        pdf.cell(width, 8, label, border=1, align=align, fill=True)
+    pdf.ln(8)
+    pdf.set_font('Helvetica', '', 10)
+    for label, minutes, amount in (('Off-site work (off-office support)', slip['off_min'], slip['off_amt']),
+                                    ('On duty work (in office)', slip['on_min'], slip['on_amt'])):
+        rate = _effective_rate(amount, minutes)
+        pdf.cell(80, 8, label, border=1)
+        pdf.cell(25, 8, f'{minutes:.0f}', border=1, align='R')
+        pdf.cell(25, 8, _fmt_hm(minutes), border=1, align='R')
+        pdf.cell(25, 8, f'${rate:.2f}' if rate else '-', border=1, align='R')
+        pdf.cell(25, 8, f'${amount:.2f}', border=1, align='R')
+        pdf.ln(8)
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(130, 9, 'TOTAL PAYABLE', border=1, align='R', fill=True)
+    pdf.cell(50, 9, f"${slip['total']:.2f}", border=1, align='R', fill=True)
+    pdf.ln(14)
+
+    pdf.set_font('Helvetica', 'B', 11)
+    pdf.cell(0, 7, 'Work log', new_x='LMARGIN', new_y='NEXT')
+    pdf.set_font('Helvetica', 'B', 9)
+    for width, label, align in ((35, 'Date', 'L'), (85, 'Type', 'L'), (30, 'Minutes', 'R'), (30, 'Amount', 'R')):
+        pdf.cell(width, 6, label, border=1, align=align, fill=True)
+    pdf.ln(6)
+    pdf.set_font('Helvetica', '', 9)
+    if not slip['entries']:
+        pdf.cell(180, 6, 'No entries.', border=1, new_x='LMARGIN', new_y='NEXT')
+    for e in slip['entries']:
+        kind = 'On duty (in office)' if e['reason'] in ON_DUTY_REASONS else 'Off-site'
+        pdf.cell(35, 6, _fmt_day(_local_date(e['created_at'])), border=1)
+        pdf.cell(85, 6, kind, border=1)
+        pdf.cell(30, 6, f"{e['minutes']:.0f}" if e['minutes'] else '-', border=1, align='R')
+        pdf.cell(30, 6, f"${e['amount']:.2f}", border=1, align='R')
+        pdf.ln(6)
+
+    pdf.ln(6)
+    pdf.set_font('Helvetica', '', 8)
+    pdf.set_text_color(110, 117, 124)
+    generated = datetime.now(SYDNEY_TZ).strftime('%d %b %Y %H:%M')
+    pdf.cell(0, 5, safe(f"Generated {generated} (Sydney time). Period runs Sunday 12:00am to Saturday 11:59pm."))
+    return bytes(pdf.output())
+
+
 @app.route('/admin/payroll', methods=['GET', 'POST'])
 @payroll_access_required
 def payroll():
     db = get_db()
     is_payroll_only = bool(session.get('payroll_only'))
     if request.method == 'POST':
-        action = request.form.get('action', 'mark_paid')
+        action = request.form.get('action', '')
 
-        if action == 'mark_paid':
-            user_id = request.form.get('user_id')
-            unpaid = db.execute(
-                'SELECT * FROM payments WHERE user_id = ? AND payroll_run_id IS NULL',
-                (user_id,),
-            ).fetchall()
-            if unpaid:
-                total = sum(p['amount'] for p in unpaid)
-                period_start = min(p['created_at'] for p in unpaid)
-                period_end = max(p['created_at'] for p in unpaid)
-                now = datetime.now(timezone.utc).isoformat()
-                cur = db.execute(
-                    'INSERT INTO payroll_runs (user_id, period_start, period_end, total_amount, paid_at) '
-                    'VALUES (?, ?, ?, ?, ?)',
-                    (user_id, period_start, period_end, total, now),
-                )
-                run_id = cur.lastrowid
-                db.execute(
-                    "UPDATE payments SET payroll_run_id = ? WHERE id IN ({})".format(
-                        ','.join(str(p['id']) for p in unpaid)
-                    ),
-                    (run_id,),
-                )
-                db.commit()
-                flash(f'Marked ${total:.2f} as paid.', 'success')
+        if action == 'mark_slip_paid':
+            try:
+                user_id = int(request.form.get('user_id', ''))
+                period_start = date.fromisoformat(request.form.get('period', ''))
+            except ValueError:
+                flash('That pay slip could not be found.', 'warning')
+                return redirect(url_for('payroll'))
+            slip = next((sl for sl in _unpaid_slips(db, user_id) if sl['period_start'] == period_start), None)
+            if not slip:
+                flash('Nothing unpaid in that fortnight - it may already have been paid.', 'warning')
+                return redirect(url_for('payroll'))
+            try:
+                pay_date = date.fromisoformat(request.form.get('pay_date', ''))
+            except ValueError:
+                pay_date = slip['default_pay_date']
+            user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+            employer_name, employer_abn = _employer_details()
+            cur = db.execute(
+                'INSERT INTO payroll_runs (user_id, period_start, period_end, total_amount, paid_at, '
+                'pay_date, employer_name, employer_abn, worker_abn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (user_id, slip['period_start'].isoformat(), slip['period_end'].isoformat(), slip['total'],
+                 datetime.now(timezone.utc).isoformat(), pay_date.isoformat(), employer_name,
+                 employer_abn, user['abn'] if user else None),
+            )
+            run_id = cur.lastrowid
+            ids = [e['id'] for e in slip['entries']]
+            db.execute(
+                'UPDATE payments SET payroll_run_id = ? WHERE payroll_run_id IS NULL AND id IN ({})'.format(
+                    ','.join('?' * len(ids))),
+                [run_id] + ids,
+            )
+            db.commit()
+            flash(f"Paid and filed: {user['display_name']}, {_fmt_day(slip['period_start'])} to "
+                  f"{_fmt_day(slip['period_end'])}, ${slip['total']:.2f}.", 'success')
+            return redirect(url_for('payroll_slip_run', run_id=run_id))
 
         elif action == 'adjust_payment' and not is_payroll_only:
             payment_id = request.form.get('payment_id')
@@ -2026,6 +2276,7 @@ def payroll():
             'minutes': row['minutes'],
             'count': row['n'],
             'entries': entries,
+            'slips': _unpaid_slips(db, u['id']),
         })
 
     period_from = request.args.get('from', '').strip()
@@ -2044,7 +2295,57 @@ def payroll():
     history = db.execute(history_query, history_params).fetchall()
 
     return render_template('payroll.html', totals=totals, history=history, is_payroll_only=is_payroll_only,
-                            period_from=period_from, period_to=period_to)
+                            period_from=period_from, period_to=period_to,
+                            abn_missing=not cfg('payslip_abn'), fmt_day=_fmt_day, fmt_hm=_fmt_hm)
+
+
+def _slip_from_request(db):
+    """Resolves ?run_id=N (a filed slip) or ?user_id=N&period=YYYY-MM-DD (an
+    unpaid one) to a ready-to-show slip, or None."""
+    run_id = request.args.get('run_id', type=int)
+    if run_id:
+        run = db.execute('SELECT * FROM payroll_runs WHERE id = ?', (run_id,)).fetchone()
+        return _slip_header_details(db, _paid_slip(db, run)) if run else None
+    user_id = request.args.get('user_id', type=int)
+    try:
+        period_start = date.fromisoformat(request.args.get('period', ''))
+    except ValueError:
+        return None
+    slip = next((sl for sl in _unpaid_slips(db, user_id) if sl['period_start'] == period_start), None)         if user_id else None
+    return _slip_header_details(db, slip) if slip else None
+
+
+@app.route('/admin/payroll/slip')
+@payroll_access_required
+def payroll_slip():
+    db = get_db()
+    slip = _slip_from_request(db)
+    if not slip:
+        flash('That pay slip could not be found - it may already have been paid.', 'warning')
+        return redirect(url_for('payroll'))
+    return render_template('payslip.html', slip=slip, is_payroll_only=bool(session.get('payroll_only')),
+                            fmt_day=_fmt_day, fmt_hm=_fmt_hm, local_date=_local_date,
+                            on_duty_reasons=ON_DUTY_REASONS, effective_rate=_effective_rate)
+
+
+@app.route('/admin/payroll/slip/<int:run_id>')
+@payroll_access_required
+def payroll_slip_run(run_id):
+    return redirect(url_for('payroll_slip', run_id=run_id))
+
+
+@app.route('/admin/payroll/slip.pdf')
+@payroll_access_required
+def payroll_slip_pdf():
+    db = get_db()
+    slip = _slip_from_request(db)
+    if not slip:
+        flash('That pay slip could not be found.', 'warning')
+        return redirect(url_for('payroll'))
+    who = slip['user']['display_name'].replace(' ', '_') if slip['user'] else 'staff'
+    filename = f"payslip_{who}_{slip['period_start'].isoformat()}.pdf"
+    return Response(_build_payslip_pdf(slip), mimetype='application/pdf',
+                     headers={'Content-Disposition': f'inline; filename="{filename}"'})
 
 
 PAYMENT_REASON_LABELS = {
@@ -2181,13 +2482,15 @@ def admin_users():
             office_rate = request.form.get('office_hourly_rate', '').strip()
             office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
+            abn = request.form.get('abn', '').strip()
             if not display_name:
                 flash('Display name is required.', 'danger')
             else:
                 db.execute(
                     'INSERT INTO users (display_name, role, hourly_rate, clinic_hourly_rate, '
-                    'office_hourly_rate, phone_number) VALUES (?, ?, ?, ?, ?, ?)',
-                    (display_name, role, off_office_rate_val, off_office_rate_val, office_rate_val, phone or None),
+                    'office_hourly_rate, phone_number, abn) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (display_name, role, off_office_rate_val, off_office_rate_val, office_rate_val,
+                     phone or None, abn or None),
                 )
                 db.commit()
                 flash(f'Added {display_name}.', 'success')
@@ -2199,15 +2502,16 @@ def admin_users():
             office_rate = request.form.get('office_hourly_rate', '').strip()
             office_rate_val = float(office_rate) if office_rate else None
             phone = request.form.get('phone_number', '').strip()
+            abn = request.form.get('abn', '').strip()
             active = 1 if request.form.get('active') == 'on' else 0
             is_doctor = 1 if request.form.get('is_doctor') == 'on' else 0
             if is_doctor:
                 db.execute('UPDATE users SET is_doctor = 0 WHERE id != ?', (user_id,))
             db.execute(
                 'UPDATE users SET role = ?, hourly_rate = ?, clinic_hourly_rate = ?, office_hourly_rate = ?, '
-                'phone_number = ?, active = ?, is_doctor = ? WHERE id = ?',
-                (role, off_office_rate_val, off_office_rate_val, office_rate_val, phone or None, active,
-                 is_doctor, user_id),
+                'phone_number = ?, abn = ?, active = ?, is_doctor = ? WHERE id = ?',
+                (role, off_office_rate_val, off_office_rate_val, office_rate_val, phone or None, abn or None,
+                 active, is_doctor, user_id),
             )
             db.commit()
             flash('User updated.', 'success')
@@ -2321,6 +2625,20 @@ def admin_settings():
             else:
                 set_cfg('shared_password_hash', generate_password_hash(new_password))
                 flash('Shared login password updated.', 'success')
+        elif action == 'save_payslip':
+            set_cfg('payslip_business_name', request.form.get('payslip_business_name', '').strip())
+            set_cfg('payslip_abn', request.form.get('payslip_abn', '').strip())
+            raw_anchor = request.form.get('payperiod_anchor', '').strip()
+            try:
+                anchor_day = date.fromisoformat(raw_anchor)
+            except ValueError:
+                anchor_day = None
+            if anchor_day is None or anchor_day.weekday() != 6:
+                flash('Pay slip details saved, but the fortnight start date was not changed - it has to '
+                      'be a Sunday.', 'warning')
+            else:
+                set_cfg('payperiod_anchor', anchor_day.isoformat())
+                flash('Pay slip settings saved.', 'success')
         elif action == 'change_payroll_password':
             new_password = request.form.get('new_payroll_password', '')
             confirm = request.form.get('new_payroll_password_confirm', '')
@@ -2387,6 +2705,9 @@ def admin_settings():
         has_stripe_webhook_secret=bool(cfg('stripe_webhook_secret')),
         has_anthropic_key=bool(cfg('anthropic_api_key')),
         has_payroll_password=bool(cfg('payroll_password_hash')),
+        payslip_business_name=cfg('payslip_business_name', 'Shore Gastroenterology'),
+        payslip_abn=cfg('payslip_abn', ''),
+        payperiod_anchor=_pay_period_anchor().isoformat(),
     )
 
 

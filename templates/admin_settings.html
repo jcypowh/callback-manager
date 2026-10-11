@@ -218,6 +218,32 @@
 </form>
 
 <form method="post" class="card p-3 mt-3" style="max-width:500px;">
+  <input type="hidden" name="action" value="save_payslip">
+  <h5>Pay slips</h5>
+  <p class="text-muted small">
+    Printed at the top of every pay slip. Pay slips run fortnightly, Sunday to Saturday, in Sydney time.
+  </p>
+  <div class="mb-3">
+    <label class="form-label">Business name</label>
+    <input type="text" name="payslip_business_name" class="form-control" value="{{ payslip_business_name }}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">ABN</label>
+    <input type="text" name="payslip_abn" class="form-control" value="{{ payslip_abn }}" placeholder="12 345 678 901">
+    <div class="form-text">Shown clearly on every pay slip. A person's own ABN (if they have one) is set under Users.</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">A Sunday that starts a fortnight</label>
+    <input type="date" name="payperiod_anchor" class="form-control" value="{{ payperiod_anchor }}" required>
+    <div class="form-text">
+      Every fortnight is counted from this date, so pick the first day of any real pay period (it must be a Sunday).
+      Change it and the unpaid slips regroup straight away - nothing already paid or filed is affected.
+    </div>
+  </div>
+  <button class="btn btn-primary">Save pay slip settings</button>
+</form>
+
+<form method="post" class="card p-3 mt-3" style="max-width:500px;">
   <input type="hidden" name="action" value="change_payroll_password">
   <h5>Payroll-only login</h5>
   <p class="text-muted small">

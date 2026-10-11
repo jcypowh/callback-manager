@@ -5,16 +5,22 @@
   <div>
     <h3 class="mb-1">Payroll</h3>
     <p class="text-muted small mb-0">
+      Pay slips run fortnightly, Sunday to Saturday. Open a slip to check it, then mark it paid and it's filed
+      under Payment history.
       {% if is_payroll_only %}
-      View, mark as paid, and export reports. Only Dr Tu or Sally can adjust an amount, remove an
-      entry, or change a pay rate.
-      {% else %}
-      Off-office rate covers per-task minutes and standalone off-office support hours; office rate
-      is for time logged in-office with Dr Tu.
+      Only Dr Tu or Sally can adjust an amount, remove an entry, or change a pay rate.
       {% endif %}
     </p>
   </div>
 </div>
+
+{% if abn_missing %}
+<div class="alert alert-warning">
+  The business ABN isn't set yet, so pay slips will say "ABN not set".
+  {% if is_payroll_only %}Ask Dr Tu or Sally to add it under Settings.{% else %}
+  Add it under <a href="{{ url_for('admin_settings') }}">Settings &rarr; Pay slips</a>.{% endif %}
+</div>
+{% endif %}
 
 <div class="row g-3 mb-4">
   {% for row in totals %}
@@ -32,6 +38,33 @@
             {% endif %}
           </div>
         </div>
+
+        <div class="small text-muted text-uppercase mb-1">Pay slips to pay</div>
+        {% if not row.slips %}
+        <p class="text-muted">Nothing unpaid.</p>
+        {% else %}
+        <div class="list-group mb-3">
+          {% for slip in row.slips %}
+          <a class="list-group-item list-group-item-action"
+             href="{{ url_for('payroll_slip', user_id=row.user.id, period=slip.period_start.isoformat()) }}">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+              <div>
+                <div class="fw-semibold">{{ fmt_day(slip.period_start) }} to {{ fmt_day(slip.period_end) }}</div>
+                <div class="small text-muted">
+                  Off-site {{ fmt_hm(slip.off_min) }} h (${{ '%.2f'|format(slip.off_amt) }})
+                  &middot; On duty {{ fmt_hm(slip.on_min) }} h (${{ '%.2f'|format(slip.on_amt) }})
+                </div>
+              </div>
+              <div class="text-end text-nowrap">
+                <div class="fw-bold">${{ '%.2f'|format(slip.total) }}</div>
+                {% if slip.is_open %}<span class="badge bg-info text-dark">Still running</span>
+                {% else %}<span class="badge bg-warning text-dark">Ready to pay</span>{% endif %}
+              </div>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+        {% endif %}
 
         {% if not is_payroll_only %}
         <form method="post" class="row g-2 align-items-end mb-3">
@@ -54,27 +87,12 @@
         </form>
         {% endif %}
 
-        <p class="text-muted small mb-1">
-          {{ row.minutes|round|int }} min logged across {{ row.count }} entr{{ 'y' if row.count == 1 else 'ies' }}, unpaid
-        </p>
-        <p class="fs-4 fw-bold mb-3">${{ '%.2f'|format(row.total) }}</p>
-        <div class="d-flex gap-2 flex-wrap">
-          {% if row.total > 0 %}
-          <form method="post" class="d-inline">
-            <input type="hidden" name="action" value="mark_paid">
-            <input type="hidden" name="user_id" value="{{ row.user.id }}">
-            <button class="btn btn-success btn-sm">Mark paid</button>
-          </form>
-          {% endif %}
-          <a class="btn btn-outline-secondary btn-sm"
-             href="{{ url_for('payroll_export_pdf', user_id=row.user.id) }}">
-            <i class="fa-solid fa-file-pdf"></i> Download unpaid summary (PDF)
-          </a>
-        </div>
-
         {% if row.entries %}
-        <details class="mt-3">
-          <summary class="small text-muted">Show {{ row.entries|length }} unpaid entr{{ 'y' if row.entries|length == 1 else 'ies' }}</summary>
+        <details>
+          <summary class="small text-muted">
+            All {{ row.entries|length }} unpaid entr{{ 'y' if row.entries|length == 1 else 'ies' }}
+            ({{ row.minutes|round|int }} min, ${{ '%.2f'|format(row.total) }})
+          </summary>
           <table class="table table-sm mt-2">
             <thead><tr><th>When</th><th>What</th><th>Min</th><th>Amount</th>{% if not is_payroll_only %}<th></th>{% endif %}</tr></thead>
             <tbody>
@@ -120,7 +138,7 @@
   {% endfor %}
 </div>
 
-<h5>Payment history</h5>
+<h5>Payment history <span class="text-muted fs-6">(paid &amp; filed pay slips)</span></h5>
 <form method="get" class="mb-3 d-flex gap-2 align-items-end flex-wrap">
   <div>
     <label class="form-label small mb-0">From</label>
@@ -141,14 +159,21 @@
 <p class="text-muted">{{ 'No paid runs in that period.' if (period_from or period_to) else 'No payments recorded yet.' }}</p>
 {% else %}
 <table class="table table-sm bg-white">
-  <thead><tr><th>Paid</th><th>Person</th><th>Period</th><th>Amount</th></tr></thead>
+  <thead><tr><th>Slip</th><th>Person</th><th>Pay period</th><th>Pay date</th><th>Amount</th><th></th></tr></thead>
   <tbody>
     {% for h in history %}
     <tr>
-      <td class="text-nowrap small text-muted">{{ h.paid_at[:16].replace('T', ' ') }}</td>
+      <td class="text-nowrap small text-muted">PS-{{ '%05d'|format(h.id) }}</td>
       <td>{{ h.display_name }}</td>
       <td class="small text-muted">{{ h.period_start[:10] }} – {{ h.period_end[:10] }}</td>
+      <td class="small text-nowrap">{{ h.pay_date or h.paid_at[:10] }}</td>
       <td>${{ '%.2f'|format(h.total_amount) }}</td>
+      <td class="text-nowrap">
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('payroll_slip', run_id=h.id) }}">Open pay slip</a>
+        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('payroll_slip_pdf', run_id=h.id) }}" target="_blank" title="Download PDF">
+          <i class="fa-solid fa-file-pdf"></i>
+        </a>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

@@ -1,0 +1,122 @@
+{% extends 'base.html' %}
+{% block title %}Pay slip — {{ slip.user.display_name if slip.user else '' }}{% endblock %}
+{% block content %}
+{% set pdf_url = url_for('payroll_slip_pdf', run_id=slip.run.id) if slip.paid
+                 else url_for('payroll_slip_pdf', user_id=slip.user_id, period=slip.period_start.isoformat()) %}
+
+<div class="mb-3 d-flex gap-2 flex-wrap">
+  <a href="{{ url_for('payroll') }}" class="btn btn-outline-secondary btn-sm">&larr; Back to Payroll</a>
+  <a href="{{ pdf_url }}" target="_blank" class="btn btn-outline-primary btn-sm">
+    <i class="fa-solid fa-file-pdf"></i> Download / print PDF
+  </a>
+</div>
+
+{% if not slip.employer_abn %}
+<div class="alert alert-warning" style="max-width:820px;">
+  The business ABN hasn't been set yet, so this pay slip shows "ABN not set".
+  {% if is_payroll_only %}Ask Dr Tu or Sally to add it under Settings.{% else %}
+  Add it under <a href="{{ url_for('admin_settings') }}">Settings &rarr; Pay slips</a>.{% endif %}
+</div>
+{% endif %}
+
+<div class="card shadow-sm" style="max-width:820px;">
+  <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2 py-3">
+    <div>
+      <div class="fs-3 fw-bold">PAY SLIP</div>
+      <div class="small">{{ slip.slip_no }}</div>
+    </div>
+    <div class="text-end">
+      <div class="fw-semibold">{{ slip.employer_name }}</div>
+      <div class="fs-5">{% if slip.employer_abn %}ABN {{ slip.employer_abn }}{% else %}ABN not set{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="card-body">
+    <div class="row g-3 mb-4">
+      <div class="col-sm-6">
+        <div class="text-muted small text-uppercase">Employee</div>
+        <div class="fs-5 fw-semibold">{{ slip.user.display_name if slip.user else '' }}</div>
+        {% if slip.worker_abn %}<div>ABN {{ slip.worker_abn }}</div>{% endif %}
+      </div>
+      <div class="col-sm-6">
+        <div class="text-muted small text-uppercase">Pay details</div>
+        <div><strong>Pay period:</strong> {{ fmt_day(slip.period_start) }} to {{ fmt_day(slip.period_end) }}</div>
+        <div><strong>Pay date:</strong> {{ fmt_day(slip.pay_date) if slip.pay_date else 'Not recorded' }}</div>
+        <div>
+          <strong>Status:</strong>
+          {% if slip.paid %}<span class="badge bg-success">Paid &amp; filed</span>
+          {% elif slip.is_open %}<span class="badge bg-info text-dark">Fortnight still running</span>
+          {% else %}<span class="badge bg-warning text-dark">Ready to pay</span>{% endif %}
+          {% if slip.supplementary and not slip.paid %}<span class="badge bg-secondary">Extra slip for a fortnight already paid</span>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <table class="table table-bordered align-middle mb-4">
+      <thead class="table-light">
+        <tr><th>Description</th><th class="text-end">Minutes</th><th class="text-end">Hours</th>
+            <th class="text-end">Rate / hr</th><th class="text-end">Amount</th></tr>
+      </thead>
+      <tbody>
+        {% for label, minutes, amount in (('Off-site work (off-office support)', slip.off_min, slip.off_amt),
+                                          ('On duty work (in office)', slip.on_min, slip.on_amt)) %}
+        {% set rate = effective_rate(amount, minutes) %}
+        <tr>
+          <td>{{ label }}</td>
+          <td class="text-end">{{ '%.0f'|format(minutes) }}</td>
+          <td class="text-end">{{ fmt_hm(minutes) }}</td>
+          <td class="text-end">{{ '$%.2f'|format(rate) if rate else '—' }}</td>
+          <td class="text-end">${{ '%.2f'|format(amount) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-light">
+        <tr><th colspan="4" class="text-end">TOTAL PAYABLE</th><th class="text-end fs-5">${{ '%.2f'|format(slip.total) }}</th></tr>
+      </tfoot>
+    </table>
+
+    <details>
+      <summary class="mb-2">Work log ({{ slip.entries|length }} entr{{ 'y' if slip.entries|length == 1 else 'ies' }})</summary>
+      <table class="table table-sm">
+        <thead><tr><th>Date</th><th>Type</th><th class="text-end">Minutes</th><th class="text-end">Amount</th></tr></thead>
+        <tbody>
+          {% for e in slip.entries %}
+          <tr>
+            <td class="text-nowrap">{{ fmt_day(local_date(e.created_at)) }}</td>
+            <td>{{ 'On duty (in office)' if e.reason in on_duty_reasons else 'Off-site' }}</td>
+            <td class="text-end">{{ '%.0f'|format(e.minutes) if e.minutes else '—' }}</td>
+            <td class="text-end">${{ '%.2f'|format(e.amount) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  </div>
+
+  <div class="card-footer bg-light">
+    {% if slip.paid %}
+    <div class="text-success fw-semibold">
+      <i class="fa-solid fa-circle-check"></i>
+      Paid and filed as {{ slip.slip_no }} on {{ fmt_day(local_date(slip.paid_at)) }}.
+    </div>
+    {% else %}
+    <form method="post" action="{{ url_for('payroll') }}" class="d-flex gap-2 align-items-end flex-wrap"
+          {% if slip.is_open %}
+          onsubmit="return confirm('This fortnight has not finished yet - paying now only covers what has been logged so far, and anything logged later will come up as a separate slip. Mark as paid anyway?');"
+          {% else %}
+          onsubmit="return confirm('Mark this pay slip as paid for ${{ '%.2f'|format(slip.total) }} and file it?');"
+          {% endif %}>
+      <input type="hidden" name="action" value="mark_slip_paid">
+      <input type="hidden" name="user_id" value="{{ slip.user_id }}">
+      <input type="hidden" name="period" value="{{ slip.period_start.isoformat() }}">
+      <div>
+        <label class="form-label small mb-0">Pay date</label>
+        <input type="date" name="pay_date" class="form-control form-control-sm"
+               value="{{ slip.default_pay_date.isoformat() }}" required>
+      </div>
+      <button class="btn btn-success"><i class="fa-solid fa-check"></i> Mark as paid &amp; file</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
