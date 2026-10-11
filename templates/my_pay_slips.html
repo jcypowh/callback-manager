@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block title %}My Pay Slips — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">My pay slips</h3>
+<p class="text-muted small mb-3">Your pay slips appear here once they've been paid. Download one to keep or send on.</p>
+
+{% if not runs %}
+<p class="text-muted">No pay slips yet.</p>
+{% else %}
+<table class="table table-sm bg-white" style="max-width:760px;">
+  <thead><tr><th>Slip</th><th>Pay period</th><th>Pay date</th><th class="text-end">Amount</th><th></th></tr></thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td class="text-nowrap small text-muted">PS-{{ '%05d'|format(r.id) }}</td>
+      <td class="small">{{ r.period_start[:10] }} – {{ r.period_end[:10] }}</td>
+      <td class="small text-nowrap">{{ r.pay_date or r.paid_at[:10] }}</td>
+      <td class="text-end">${{ '%.2f'|format(r.total_amount) }}</td>
+      <td class="text-nowrap">
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('payroll_slip', run_id=r.id) }}">Open</a>
+        <a class="btn btn-sm btn-primary" href="{{ url_for('payroll_slip_pdf', run_id=r.id, download=1) }}">
+          <i class="fa-solid fa-download"></i> PDF
+        </a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -2315,37 +2315,65 @@ def _slip_from_request(db):
     return _slip_header_details(db, slip) if slip else None
 
 
+def _slip_access_ok(slip):
+    """Admins and the Payroll login can open any slip. Anyone else (Warren,
+    Rosie) can only open their own slips, and only once they've been paid and
+    filed - never a draft."""
+    if session.get('payroll_only') or session.get('role') == 'admin':
+        return True
+    return bool(slip['paid'] and session.get('user_id') == slip['user_id'])
+
+
+def _slips_home():
+    return url_for('payroll') if (session.get('payroll_only') or session.get('role') == 'admin')         else url_for('my_pay_slips')
+
+
 @app.route('/admin/payroll/slip')
-@payroll_access_required
 def payroll_slip():
     db = get_db()
     slip = _slip_from_request(db)
-    if not slip:
+    if not slip or not _slip_access_ok(slip):
         flash('That pay slip could not be found - it may already have been paid.', 'warning')
-        return redirect(url_for('payroll'))
+        return redirect(_slips_home())
     return render_template('payslip.html', slip=slip, is_payroll_only=bool(session.get('payroll_only')),
+                            is_admin_view=bool(session.get('payroll_only') or session.get('role') == 'admin'),
+                            back_url=_slips_home(),
                             fmt_day=_fmt_day, fmt_hm=_fmt_hm, local_date=_local_date,
                             on_duty_reasons=ON_DUTY_REASONS, effective_rate=_effective_rate)
 
 
 @app.route('/admin/payroll/slip/<int:run_id>')
-@payroll_access_required
 def payroll_slip_run(run_id):
     return redirect(url_for('payroll_slip', run_id=run_id))
 
 
 @app.route('/admin/payroll/slip.pdf')
-@payroll_access_required
 def payroll_slip_pdf():
+    """?download=1 saves the file; otherwise it opens in the browser."""
     db = get_db()
     slip = _slip_from_request(db)
-    if not slip:
+    if not slip or not _slip_access_ok(slip):
         flash('That pay slip could not be found.', 'warning')
-        return redirect(url_for('payroll'))
-    who = slip['user']['display_name'].replace(' ', '_') if slip['user'] else 'staff'
-    filename = f"payslip_{who}_{slip['period_start'].isoformat()}.pdf"
+        return redirect(_slips_home())
+    who = re.sub(r'[^A-Za-z0-9]+', '_', slip['user']['display_name']).strip('_') if slip['user'] else 'staff'
+    filename = f"Payslip_{who}_{slip['period_start'].isoformat()}_to_{slip['period_end'].isoformat()}.pdf"
+    if not slip['paid']:
+        filename = filename.replace('Payslip_', 'DRAFT_Payslip_', 1)
+    disposition = 'attachment' if request.args.get('download') else 'inline'
     return Response(_build_payslip_pdf(slip), mimetype='application/pdf',
-                     headers={'Content-Disposition': f'inline; filename="{filename}"'})
+                     headers={'Content-Disposition': f'{disposition}; filename="{filename}"'})
+
+
+@app.route('/my-pay-slips')
+def my_pay_slips():
+    """Warren/Rosie's own filed pay slips - nobody else's."""
+    user = current_user()
+    if not user:
+        return redirect(url_for('payroll'))
+    runs = get_db().execute(
+        'SELECT * FROM payroll_runs WHERE user_id = ? ORDER BY period_start DESC', (user['id'],)
+    ).fetchall()
+    return render_template('my_pay_slips.html', runs=runs, fmt_day=_fmt_day)
 
 
 PAYMENT_REASON_LABELS = {

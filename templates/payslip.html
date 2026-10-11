@@ -5,13 +5,16 @@
                  else url_for('payroll_slip_pdf', user_id=slip.user_id, period=slip.period_start.isoformat()) %}
 
 <div class="mb-3 d-flex gap-2 flex-wrap">
-  <a href="{{ url_for('payroll') }}" class="btn btn-outline-secondary btn-sm">&larr; Back to Payroll</a>
+  <a href="{{ back_url }}" class="btn btn-outline-secondary btn-sm">&larr; Back</a>
+  <a href="{{ pdf_url }}{{ '&' if '?' in pdf_url else '?' }}download=1" class="btn btn-primary btn-sm">
+    <i class="fa-solid fa-download"></i> Download PDF
+  </a>
   <a href="{{ pdf_url }}" target="_blank" class="btn btn-outline-primary btn-sm">
-    <i class="fa-solid fa-file-pdf"></i> Download / print PDF
+    <i class="fa-solid fa-print"></i> View / print
   </a>
 </div>
 
-{% if not slip.employer_abn %}
+{% if not slip.employer_abn and is_admin_view %}
 <div class="alert alert-warning" style="max-width:820px;">
   The business ABN hasn't been set yet, so this pay slip shows "ABN not set".
   {% if is_payroll_only %}Ask Dr Tu or Sally to add it under Settings.{% else %}

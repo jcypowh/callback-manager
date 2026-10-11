@@ -170,8 +170,8 @@
       <td>${{ '%.2f'|format(h.total_amount) }}</td>
       <td class="text-nowrap">
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('payroll_slip', run_id=h.id) }}">Open pay slip</a>
-        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('payroll_slip_pdf', run_id=h.id) }}" target="_blank" title="Download PDF">
-          <i class="fa-solid fa-file-pdf"></i>
+        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('payroll_slip_pdf', run_id=h.id, download=1) }}" title="Download PDF">
+          <i class="fa-solid fa-download"></i> PDF
         </a>
       </td>
     </tr>
