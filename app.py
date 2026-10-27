@@ -933,16 +933,44 @@ def _build_stats(rows, today, include_fax=False):
     }
 
 
+def _stats_rows(db):
+    """Tasks plus filed referral documents, as uniform rows for _build_stats.
+
+    Fax/email referrals are counted from the Document Archive (what actually
+    arrived, dated by when it was received) rather than from the tasks they
+    spawned, so referrals filed from existing callbacks or filed before tasks
+    were auto-created still count. A referral document whose task is already
+    counted as a new patient (Halaxy / AI booking / referral drop) is skipped
+    so the same person isn't counted twice. Deleted documents are ignored."""
+    tasks = db.execute(
+        "SELECT id, created_at, intake_source, intake_kind, source_label FROM tasks "
+        "WHERE gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%'"
+    ).fetchall()
+    rows, counted_new = [], set()
+    for t in tasks:
+        cat = _stat_category(t['intake_source'], t['intake_kind'], t['source_label'])
+        if cat == 'fax_email_referral':
+            continue  # represented by its document below
+        if cat in NEW_PATIENT_KEYS:
+            counted_new.add(t['id'])
+        rows.append(t)
+    docs = db.execute(
+        "SELECT received_at, source, linked_task_id FROM fax_documents "
+        "WHERE category = 'referral' AND dismissed_at IS NULL"
+    ).fetchall()
+    for d in docs:
+        if d['linked_task_id'] in counted_new:
+            continue
+        rows.append({'created_at': d['received_at'], 'intake_source': None, 'intake_kind': None,
+                     'source_label': 'Email referral' if d['source'] == 'email' else 'Fax referral'})
+    return rows
+
+
 @app.route('/stats')
 @admin_required
 def stats_page():
-    # Seeded training patients aren't real intake, so they're left out.
-    rows = get_db().execute(
-        "SELECT created_at, intake_source, intake_kind, source_label FROM tasks "
-        "WHERE gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%'"
-    ).fetchall()
-    include_fax = request.args.get('fax') == '1'
-    stats = _build_stats(rows, datetime.now(SYDNEY_TZ).date(), include_fax)
+    include_fax = request.args.get('fax') != '0'  # on by default
+    stats = _build_stats(_stats_rows(get_db()), datetime.now(SYDNEY_TZ).date(), include_fax)
     return render_template('stats.html', stats=stats, include_fax=include_fax,
                             categories=STAT_CATEGORIES)
 
