@@ -1,5 +1,6 @@
 import os
 import re
+import calendar
 import json
 import base64
 import sqlite3
@@ -799,51 +800,151 @@ def checklist_page():
 
 # ---------- stats (counts by how a task came in) ----------
 
-INTAKE_LABELS = {
-    ('solium', 'callback_request'): 'Solium — callback requests',
-    ('solium', 'appointment_new'): 'Solium — new appointments',
-    ('solium', 'appointment_followup'): 'Solium — follow-up appointments',
-    ('halaxy', 'appointment_new'): 'Halaxy — new appointments',
-    ('halaxy', 'appointment_followup'): 'Halaxy — follow-up appointments',
-}
+STAT_CATEGORIES = [
+    ('halaxy_new', 'Halaxy new bookings'),
+    ('ai_new', 'AI (Solium) new bookings'),
+    ('referral_drop', 'Referral drops'),
+    ('fax_email_referral', 'Fax / email referrals'),
+    ('solium_callback', 'Callback requests'),
+    ('halaxy_followup', 'Halaxy follow-ups'),
+    ('solium_followup', 'AI follow-ups'),
+    ('other', 'Other / manual'),
+]
+STAT_LABELS = dict(STAT_CATEGORIES)
+NEW_PATIENT_KEYS = ('halaxy_new', 'ai_new', 'referral_drop')
+
+
+def _stat_category(source, kind, label):
+    if source == 'halaxy' and kind == 'appointment_new':
+        return 'halaxy_new'
+    if source == 'solium' and kind == 'appointment_new':
+        return 'ai_new'
+    if source == 'solium' and kind == 'callback_request':
+        return 'solium_callback'
+    if source == 'halaxy' and kind == 'appointment_followup':
+        return 'halaxy_followup'
+    if source == 'solium' and kind == 'appointment_followup':
+        return 'solium_followup'
+    if (label or '').strip().lower() == 'referral drop':
+        return 'referral_drop'
+    if (label or '') in ('Fax referral', 'Email referral'):
+        return 'fax_email_referral'
+    return 'other'
+
+
+def _pct_change(now, before):
+    """Percent change, or None when there's nothing to compare against."""
+    if not before:
+        return None
+    return (now - before) / before * 100.0
+
+
+def _build_stats(rows, today, include_fax=False):
+    """Month-by-month task counts (months are Sydney calendar months), plus a
+    fair mid-month comparison: this month so far vs the same days last month,
+    and this month projected to the end vs last month's full total."""
+    new_keys = NEW_PATIENT_KEYS + (('fax_email_referral',) if include_fax else ())
+    months = {}
+    for r in rows:
+        day = _local_date(r['created_at'])
+        cat = _stat_category(r['intake_source'], r['intake_kind'], r['source_label'])
+        m = months.setdefault((day.year, day.month), {'cat': {}, 'daily': {}})
+        m['cat'][cat] = m['cat'].get(cat, 0) + 1
+        by_day = m['daily'].setdefault(cat, {})
+        by_day[day.day] = by_day.get(day.day, 0) + 1
+
+    cur_key = (today.year, today.month)
+    prev_key = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+    months.setdefault(cur_key, {'cat': {}, 'daily': {}})
+
+    def total_new(cat_counts):
+        return sum(cat_counts.get(k, 0) for k in new_keys)
+
+    month_rows = []
+    ordered = sorted(months, reverse=True)
+    for key in ordered:
+        m = months[key]
+        days_in_month = calendar.monthrange(*key)[1]
+        is_current = key == cur_key
+        elapsed = today.day if is_current else days_in_month
+        new_total = total_new(m['cat'])
+        projected = new_total / elapsed * days_in_month if is_current and elapsed else None
+        month_rows.append({
+            'key': key,
+            'label': f'{calendar.month_name[key[1]]} {key[0]}',
+            'is_current': is_current,
+            'elapsed': elapsed,
+            'days_in_month': days_in_month,
+            'counts': m['cat'],
+            'new_total': new_total,
+            'all_total': sum(m['cat'].values()),
+            'projected_new': projected,
+        })
+    # change vs the month before, for finished months only
+    by_key = {r['key']: r for r in month_rows}
+    for r in month_rows:
+        prev = by_key.get((r['key'][0] - 1, 12) if r['key'][1] == 1 else (r['key'][0], r['key'][1] - 1))
+        r['change'] = None if r['is_current'] or not prev else _pct_change(r['new_total'], prev['new_total'])
+
+    max_bar = max([r['projected_new'] if r['projected_new'] is not None else r['new_total'] for r in month_rows] + [1])
+    for r in month_rows:
+        shown = max(r['projected_new'] or 0, r['new_total'])
+        r['bar_actual'] = r['new_total'] / max_bar * 100
+        r['bar_projected'] = max(shown - r['new_total'], 0) / max_bar * 100
+
+    # --- this month vs last month, like for like
+    cur, prev = months[cur_key], months.get(prev_key, {'cat': {}, 'daily': {}})
+    n = today.day
+    days_cur = calendar.monthrange(*cur_key)[1]
+    days_prev = calendar.monthrange(*prev_key)[1]
+
+    def upto(m, cat, last_day):
+        return sum(c for d, c in m['daily'].get(cat, {}).items() if d <= last_day)
+
+    comparison = []
+    for cat in list(new_keys) + ['__total__']:
+        keys = new_keys if cat == '__total__' else (cat,)
+        now_so_far = sum(upto(cur, k, n) for k in keys)
+        last_same = sum(upto(prev, k, min(n, days_prev)) for k in keys)
+        last_full = sum(prev['cat'].get(k, 0) for k in keys)
+        projected = now_so_far / n * days_cur
+        comparison.append({
+            'label': 'Total new patients' if cat == '__total__' else STAT_LABELS[cat],
+            'is_total': cat == '__total__',
+            'now_so_far': now_so_far,
+            'last_same': last_same,
+            'so_far_change': _pct_change(now_so_far, last_same),
+            'projected': projected,
+            'last_full': last_full,
+            'projected_change': _pct_change(projected, last_full),
+        })
+
+    return {
+        'months': month_rows,
+        'comparison': comparison,
+        'new_keys': new_keys,
+        'cur_label': f'{calendar.month_name[cur_key[1]]} {cur_key[0]}',
+        'prev_label': f'{calendar.month_name[prev_key[1]]} {prev_key[0]}',
+        'elapsed': n,
+        'days_cur': days_cur,
+        'days_prev': days_prev,
+        'has_prev': bool(prev['cat']),
+        'all_time': {k: sum(m['cat'].get(k, 0) for m in months.values()) for k, _ in STAT_CATEGORIES},
+    }
 
 
 @app.route('/stats')
 @admin_required
 def stats_page():
-    db = get_db()
-
-    def _counts(since=None):
-        query = "SELECT intake_source, intake_kind, COUNT(*) AS n FROM tasks"
-        params = []
-        if since:
-            query += " WHERE created_at >= ?"
-            params.append(since)
-        query += " GROUP BY intake_source, intake_kind"
-        rows = db.execute(query, params).fetchall()
-        breakdown = []
-        other = 0
-        for r in rows:
-            key = (r['intake_source'], r['intake_kind'])
-            if key in INTAKE_LABELS:
-                breakdown.append({'label': INTAKE_LABELS[key], 'count': r['n']})
-            else:
-                other += r['n']
-        breakdown.sort(key=lambda x: -x['count'])
-        if other:
-            breakdown.append({'label': 'Manual / referral drop / other', 'count': other})
-        total = sum(b['count'] for b in breakdown)
-        return breakdown, total
-
-    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    month_breakdown, month_total = _counts(since=month_start)
-    all_breakdown, all_total = _counts()
-
-    return render_template(
-        'stats.html',
-        month_breakdown=month_breakdown, month_total=month_total,
-        all_breakdown=all_breakdown, all_total=all_total,
-    )
+    # Seeded training patients aren't real intake, so they're left out.
+    rows = get_db().execute(
+        "SELECT created_at, intake_source, intake_kind, source_label FROM tasks "
+        "WHERE gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%'"
+    ).fetchall()
+    include_fax = request.args.get('fax') == '1'
+    stats = _build_stats(rows, datetime.now(SYDNEY_TZ).date(), include_fax)
+    return render_template('stats.html', stats=stats, include_fax=include_fax,
+                            categories=STAT_CATEGORIES)
 
 
 @app.route('/documents/<hospital_slug>/<doc_key>')

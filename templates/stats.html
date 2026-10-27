@@ -1,45 +1,144 @@
 {% extends 'base.html' %}
 {% block title %}Stats — Callback Manager{% endblock %}
+{% macro pct(v) -%}
+  {%- if v is none -%}<span class="text-muted">—</span>
+  {%- else -%}<span class="{{ 'text-success' if v > 0.5 else ('text-danger' if v < -0.5 else 'text-muted') }} fw-semibold">{{ '%+.0f%%'|format(v) }}</span>
+  {%- endif -%}
+{%- endmacro %}
 {% block content %}
-<h3 class="mb-3">Stats</h3>
-<p class="text-muted small mb-3">How tasks have been coming in, broken down by source and type.</p>
-
-<div class="row g-3">
-  <div class="col-12 col-lg-6">
-    <div class="card">
-      <div class="card-body">
-        <h5 class="card-title">This month <span class="text-muted fw-normal">({{ month_total }} total)</span></h5>
-        {% if not month_breakdown %}
-        <p class="text-muted small mb-0">Nothing yet this month.</p>
-        {% else %}
-        <table class="table table-sm mb-0">
-          <tbody>
-            {% for b in month_breakdown %}
-            <tr><td>{{ b.label }}</td><td class="text-end">{{ b.count }}</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% endif %}
-      </div>
-    </div>
+{% set labels = dict(categories) %}
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+  <div>
+    <h3 class="mb-1">Stats</h3>
+    <p class="text-muted small mb-0">
+      How tasks have been coming in, month by month. <strong>New patients</strong> =
+      {% for k in stats.new_keys %}{{ labels[k] }}{{ ', ' if not loop.last else '' }}{% endfor %}.
+      Months are counted in Sydney time.
+    </p>
   </div>
+  <form method="get" class="form-check form-switch mb-0">
+    <input class="form-check-input" type="checkbox" role="switch" id="fax" name="fax" value="1"
+           {% if include_fax %}checked{% endif %} onchange="this.form.submit()">
+    <label class="form-check-label small" for="fax">Also count fax / email referrals as new patients</label>
+  </form>
+</div>
 
-  <div class="col-12 col-lg-6">
-    <div class="card">
-      <div class="card-body">
-        <h5 class="card-title">All time <span class="text-muted fw-normal">({{ all_total }} total)</span></h5>
-        {% if not all_breakdown %}
-        <p class="text-muted small mb-0">Nothing recorded yet.</p>
-        {% else %}
-        <table class="table table-sm mb-0">
-          <tbody>
-            {% for b in all_breakdown %}
-            <tr><td>{{ b.label }}</td><td class="text-end">{{ b.count }}</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% endif %}
-      </div>
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-1">New patients: {{ stats.cur_label }} so far vs {{ stats.prev_label }}</h5>
+    <p class="text-muted small">
+      We're {{ stats.elapsed }} of {{ stats.days_cur }} days into the month. The fair comparison is the same
+      {{ stats.elapsed }} days last month; "projected" carries this month's daily pace to the end of the month.
+      {% if stats.elapsed < 7 %}<span class="text-warning-emphasis">Early in the month — the projection is rough.</span>{% endif %}
+    </p>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0 text-nowrap">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="text-end">This month so far</th>
+            <th class="text-end">Same days last month</th>
+            <th class="text-end">Change</th>
+            <th class="text-end border-start">Projected full month</th>
+            <th class="text-end">{{ stats.prev_label }} (full)</th>
+            <th class="text-end">Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in stats.comparison %}
+          <tr class="{{ 'table-light fw-bold' if c.is_total }}">
+            <td>{{ c.label }}</td>
+            <td class="text-end">{{ c.now_so_far }}</td>
+            <td class="text-end">{{ c.last_same if stats.has_prev else '—' }}</td>
+            <td class="text-end">{{ pct(c.so_far_change) }}</td>
+            <td class="text-end border-start">≈ {{ '%.0f'|format(c.projected) }}</td>
+            <td class="text-end">{{ c.last_full if stats.has_prev else '—' }}</td>
+            <td class="text-end">{{ pct(c.projected_change) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not stats.has_prev %}<p class="text-muted small mt-2 mb-0">There's no data for last month to compare against.</p>{% endif %}
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title">New patients by month</h5>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0 text-nowrap">
+        <thead>
+          <tr>
+            <th>Month</th>
+            {% for k in stats.new_keys %}<th class="text-end">{{ labels[k] }}</th>{% endfor %}
+            <th class="text-end">New patients</th>
+            <th class="text-end">vs previous month</th>
+            <th style="min-width:180px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in stats.months %}
+          <tr>
+            <td class="text-nowrap">
+              {{ m.label }}
+              {% if m.is_current %}<div class="small text-muted">{{ m.elapsed }} of {{ m.days_in_month }} days</div>{% endif %}
+            </td>
+            {% for k in stats.new_keys %}<td class="text-end">{{ m.counts.get(k, 0) }}</td>{% endfor %}
+            <td class="text-end fw-bold">
+              {{ m.new_total }}
+              {% if m.is_current %}<div class="small text-muted fw-normal">≈ {{ '%.0f'|format(m.projected_new) }} projected</div>{% endif %}
+            </td>
+            <td class="text-end">{{ pct(m.change) }}</td>
+            <td>
+              <div class="d-flex" style="height:14px;">
+                <div class="bg-primary" style="width:{{ m.bar_actual }}%;"></div>
+                {% if m.is_current %}
+                <div style="width:{{ m.bar_projected }}%; background:repeating-linear-gradient(45deg,#9ec5fe,#9ec5fe 4px,#cfe2ff 4px,#cfe2ff 8px);"></div>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-muted small mt-2 mb-0">
+      Striped bar = projected rest of the current month. Each booking or drop counts once, so someone who
+      books through two routes would appear twice.
+    </p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title">All tasks by month and source</h5>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0 text-nowrap">
+        <thead>
+          <tr>
+            <th>Month</th>
+            {% for key, label in categories %}<th class="text-end">{{ label }}</th>{% endfor %}
+            <th class="text-end">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in stats.months %}
+          <tr>
+            <td class="text-nowrap">{{ m.label }}{% if m.is_current %} <span class="small text-muted">(so far)</span>{% endif %}</td>
+            {% for key, label in categories %}<td class="text-end">{{ m.counts.get(key, 0) or '—' }}</td>{% endfor %}
+            <td class="text-end fw-bold">{{ m.all_total }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot class="table-light">
+          <tr class="fw-bold">
+            <td>All time</td>
+            {% for key, label in categories %}<td class="text-end">{{ stats.all_time[key] }}</td>{% endfor %}
+            <td class="text-end">{{ stats.all_time.values()|sum }}</td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   </div>
 </div>
