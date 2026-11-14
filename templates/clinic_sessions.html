@@ -1,0 +1,69 @@
+{% extends 'base.html' %}
+{% block title %}Clinic time — Callback Manager{% endblock %}
+{% block content %}
+<h3 class="mb-1">Clinic time</h3>
+<p class="text-muted small mb-3">
+  While someone is marked in clinic they're paid the office rate for that time, and any callback or off-office
+  minutes that fall inside it aren't paid a second time. Use the Start / Stop switch on the main page for live
+  clinic time, or add a past session below.
+  <a href="{{ url_for('queue') }}">Back to tasks</a>
+</p>
+
+<div class="card mb-4" style="max-width:720px;">
+  <div class="card-body">
+    <h5 class="card-title">Add a past session</h5>
+    <form method="post" class="row g-2 align-items-end">
+      <input type="hidden" name="action" value="add">
+      <div class="col-6 col-md-3">
+        <label class="form-label small mb-1">Who</label>
+        <select name="user_id" class="form-select" required>
+          {% for u in staff %}<option value="{{ u.id }}">{{ u.display_name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label class="form-label small mb-1">Date</label>
+        <input type="date" name="day" class="form-control" max="{{ today }}" value="{{ today }}" required>
+      </div>
+      <div class="col-4 col-md-2">
+        <label class="form-label small mb-1">Start</label>
+        <input type="time" name="start" class="form-control" required>
+      </div>
+      <div class="col-4 col-md-2">
+        <label class="form-label small mb-1">End</label>
+        <input type="time" name="end" class="form-control" required>
+      </div>
+      <div class="col-4 col-md-2"><button class="btn btn-primary w-100">Add</button></div>
+    </form>
+    <div class="text-muted small mt-2">Times are Sydney time.</div>
+  </div>
+</div>
+
+<h5>Recent sessions</h5>
+{% if not rows %}
+<p class="text-muted">No clinic sessions yet.</p>
+{% else %}
+<table class="table table-sm bg-white align-middle" style="max-width:820px;">
+  <thead><tr><th>Who</th><th>Day</th><th>Time</th><th>Length</th><th class="text-end">Pay</th><th></th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.name }}</td>
+      <td class="text-nowrap">{{ r.day }}</td>
+      <td class="text-nowrap">{{ r.start }} – {% if r.end %}{{ r.end }}{% else %}<span class="badge bg-success">running</span>{% endif %}</td>
+      <td>{{ r.duration }}</td>
+      <td class="text-end">{% if r.amount is not none %}${{ '%.2f'|format(r.amount) }}{% if r.paid %} <span class="badge bg-secondary">paid</span>{% endif %}{% else %}—{% endif %}</td>
+      <td class="text-end">
+        {% if r.end and not r.paid %}
+        <form method="post" class="d-inline" onsubmit="return confirm('Remove this session and its pay entry?');">
+          <input type="hidden" name="action" value="delete">
+          <input type="hidden" name="session_id" value="{{ r.id }}">
+          <button class="btn btn-sm btn-outline-danger" title="Remove"><i class="fa-solid fa-trash"></i></button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

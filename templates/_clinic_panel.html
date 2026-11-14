@@ -1,0 +1,33 @@
+{% if clinic_panel %}
+<div class="card mb-3 {{ 'border-success' if clinic_panel|selectattr('running')|list }}">
+  <div class="card-body py-2 d-flex flex-wrap align-items-center gap-3">
+    <span class="fw-semibold"><i class="fa-solid fa-user-doctor"></i> In clinic</span>
+    {% for p in clinic_panel %}
+      {% if is_delegate %}
+        {% if p.running %}
+          <span class="text-success">You're marked in clinic since {{ p.running.since }}. Callback time during clinic is covered by the office rate and isn't paid separately.</span>
+        {% else %}
+          <span class="text-muted small">You're not marked in clinic.</span>
+        {% endif %}
+      {% elif p.running %}
+        <form method="post" action="{{ url_for('clinic_stop') }}" class="d-flex align-items-center gap-2 mb-0">
+          <input type="hidden" name="session_id" value="{{ p.running.id }}">
+          <span class="badge bg-success">{{ p.name }}</span>
+          <span class="small {{ 'text-danger fw-semibold' if p.running.long }}">since {{ p.running.since }} ({{ p.running.for }}){% if p.running.long %} - still running?{% endif %}</span>
+          <button class="btn btn-sm btn-outline-danger">Stop</button>
+        </form>
+      {% else %}
+        <form method="post" action="{{ url_for('clinic_start') }}" class="d-flex align-items-center gap-2 mb-0">
+          <input type="hidden" name="user_id" value="{{ p.id }}">
+          <span class="badge bg-secondary">{{ p.name }}</span>
+          <span class="small text-muted">not in clinic</span>
+          <button class="btn btn-sm btn-success">Start</button>
+        </form>
+      {% endif %}
+    {% endfor %}
+    {% if not is_delegate %}
+      <a class="small ms-auto" href="{{ url_for('clinic_sessions_page') }}">History / add a session</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}

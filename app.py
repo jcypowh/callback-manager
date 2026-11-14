@@ -237,6 +237,16 @@ CREATE TABLE IF NOT EXISTS payments (
     payroll_run_id INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS clinic_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT,
+    started_by_id INTEGER,
+    ended_by_id INTEGER,
+    payment_id INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     author_id INTEGER,
@@ -502,31 +512,99 @@ def _parse_minutes(user, raw):
         return None, 'Minutes needs to be a number.'
 
 
+def _parse_iso(value):
+    dt = datetime.fromisoformat(value)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _clinic_overlap_minutes(db, user_id, minutes, end_dt):
+    """How many of the `minutes` worked (ending at end_dt) fall inside one of
+    this person's clinic sessions. Those minutes are already paid at the office
+    rate, so they must not be paid again at the off-site rate."""
+    start_dt = end_dt - timedelta(minutes=minutes)
+    covered = 0.0
+    for s in db.execute('SELECT start_at, end_at FROM clinic_sessions WHERE user_id = ?', (user_id,)).fetchall():
+        s_start = _parse_iso(s['start_at'])
+        s_end = _parse_iso(s['end_at']) if s['end_at'] else end_dt
+        secs = (min(s_end, end_dt) - max(s_start, start_dt)).total_seconds()
+        if secs > 0:
+            covered += secs / 60.0
+    return min(covered, minutes)
+
+
+def _covered_message(covered, minutes):
+    paid = minutes - covered
+    if paid > 0.01:
+        return (f'{covered:g} of those {minutes:g} min fell inside your clinic time (already paid at the '
+                f'office rate), so only {paid:g} min is paid separately.')
+    return f'All {minutes:g} min fell inside your clinic time (already paid at the office rate), so nothing extra is paid.'
+
+
 def _log_time(db, task_id, user, minutes, now):
     """Record active minutes spent, paid at the user's hourly rate (locked in
     at the rate in effect right now, so later rate changes don't rewrite
-    history). No-op if they're not on an hourly rate."""
+    history). No-op if they're not on an hourly rate. Minutes that overlap a
+    clinic session are not paid again (no double-dipping on office hours)."""
     if not minutes or not user['hourly_rate']:
         return
-    amount = round(minutes / 60.0 * user['hourly_rate'], 2)
+    covered = _clinic_overlap_minutes(db, user['id'], minutes, _parse_iso(now))
+    if covered > 0.01:
+        flash(_covered_message(covered, minutes), 'info')
+    paid = minutes - covered
+    if paid <= 0.01:
+        return
+    amount = round(paid / 60.0 * user['hourly_rate'], 2)
     db.execute(
         'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
         'VALUES (?, ?, ?, ?, ?, ?)',
-        (task_id, user['id'], amount, minutes, 'time', now),
+        (task_id, user['id'], amount, paid, 'time', now),
     )
 
 
 def _log_standalone_time(db, user, minutes, rate, reason, now):
     """Same idea as _log_time but not tied to a specific task - e.g. clinic
-    time. rate is locked in at whatever's passed, same as _log_time."""
+    time. rate is locked in at whatever's passed, same as _log_time. Off-site
+    reasons skip any minutes covered by a clinic session; returns those
+    covered minutes."""
     if not minutes or not rate:
-        return
-    amount = round(minutes / 60.0 * rate, 2)
-    db.execute(
-        'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        (None, user['id'], amount, minutes, reason, now),
-    )
+        return 0.0
+    covered = 0.0
+    if reason in ('phone_time', 'clinic_time'):
+        covered = _clinic_overlap_minutes(db, user['id'], minutes, _parse_iso(now))
+    paid = minutes - covered
+    if paid > 0.01:
+        db.execute(
+            'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (None, user['id'], round(paid / 60.0 * rate, 2), paid, reason, now),
+        )
+    return covered
+
+
+# ---------- clinic sessions (office-rate time marked by Dr Tu / Sally) ----------
+
+def _open_clinic_session(db, user_id):
+    return db.execute(
+        'SELECT * FROM clinic_sessions WHERE user_id = ? AND end_at IS NULL', (user_id,)
+    ).fetchone()
+
+
+def _close_clinic_session(db, sess, end_dt, by_id):
+    """Ends a session and books the office-rate pay for its duration."""
+    minutes = round(max((end_dt - _parse_iso(sess['start_at'])).total_seconds() / 60.0, 0), 2)
+    user = db.execute('SELECT * FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+    payment_id = None
+    if minutes > 0 and user and user['office_hourly_rate']:
+        cur = db.execute(
+            'INSERT INTO payments (task_id, user_id, amount, minutes, reason, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (None, user['id'], round(minutes / 60.0 * user['office_hourly_rate'], 2), minutes,
+             'office_time', end_dt.isoformat()),
+        )
+        payment_id = cur.lastrowid
+    db.execute('UPDATE clinic_sessions SET end_at = ?, payment_id = ?, ended_by_id = ? WHERE id = ?',
+               (end_dt.isoformat(), payment_id, by_id, sess['id']))
+    return minutes
 
 
 PAYROLL_ONLY_ENDPOINTS = ('payroll', 'payroll_export_pdf', 'payroll_slip', 'payroll_slip_run',
@@ -1113,6 +1191,7 @@ def queue():
         is_delegate=is_delegate, view=view, untouched_count=untouched_count, mine_count=mine_count,
         questions_count=questions_count, notify_targets=notify_targets, urgency_levels=URGENCY_LEVELS,
         has_ai_key=bool(cfg('anthropic_api_key')),
+        clinic_panel=_clinic_panel(db, current_user()),
     )
 
 
@@ -2022,17 +2101,17 @@ def log_time_page():
 
         now = datetime.now(timezone.utc).isoformat()
         if kind == 'phone' and user['hourly_rate']:
-            _log_standalone_time(db, user, minutes, user['hourly_rate'], 'phone_time', now)
+            covered = _log_standalone_time(db, user, minutes, user['hourly_rate'], 'phone_time', now)
             db.commit()
-            flash(f'Logged {minutes:g} min of telephone task time.', 'success')
+            flash(f'Logged {minutes:g} min of telephone task time.'
+                  + (' ' + _covered_message(covered, minutes) if covered > 0.01 else ''), 'success')
         elif kind == 'clinic' and user['clinic_hourly_rate']:
-            _log_standalone_time(db, user, minutes, user['clinic_hourly_rate'], 'clinic_time', now)
+            covered = _log_standalone_time(db, user, minutes, user['clinic_hourly_rate'], 'clinic_time', now)
             db.commit()
-            flash(f'Logged {minutes:g} min of off-office support hours.', 'success')
-        elif kind == 'office' and user['office_hourly_rate']:
-            _log_standalone_time(db, user, minutes, user['office_hourly_rate'], 'office_time', now)
-            db.commit()
-            flash(f'Logged {minutes:g} min of office hours.', 'success')
+            flash(f'Logged {minutes:g} min of off-office support hours.'
+                  + (' ' + _covered_message(covered, minutes) if covered > 0.01 else ''), 'success')
+        elif kind == 'office':
+            flash('Office hours are marked by Dr Tu or Sally when you are in clinic - you do not log them yourself.', 'warning')
         else:
             flash('Could not log that.', 'danger')
         return redirect(url_for('log_time_page'))
@@ -2047,6 +2126,160 @@ def log_time_page():
         (user['id'],),
     ).fetchall()
     return render_template('log_time.html', user=user, totals=totals, recent=recent)
+
+
+def _clinic_staff(db):
+    return db.execute(
+        "SELECT id, display_name, office_hourly_rate FROM users "
+        "WHERE active = 1 AND office_hourly_rate IS NOT NULL AND office_hourly_rate > 0 "
+        "ORDER BY display_name"
+    ).fetchall()
+
+
+def _clinic_panel(db, user):
+    """Rows for the in-clinic switch on the queue page. Dr Tu / Sally get a
+    Start/Stop per staff member; staff just see their own status."""
+    full = user['role'] in FULL_ACCESS_ROLES
+    now = datetime.now(timezone.utc)
+    rows = []
+    for u in _clinic_staff(db):
+        if not full and u['id'] != user['id']:
+            continue
+        s = _open_clinic_session(db, u['id'])
+        running = None
+        if s:
+            start = _parse_iso(s['start_at'])
+            mins = (now - start).total_seconds() / 60.0
+            running = {
+                'id': s['id'],
+                'since': start.astimezone(SYDNEY_TZ).strftime('%I:%M %p').lstrip('0').lower(),
+                'for': f'{int(mins // 60)}h {int(mins % 60):02d}m',
+                'long': mins > 10 * 60,
+            }
+        rows.append({'id': u['id'], 'name': u['display_name'], 'running': running})
+    return rows
+
+
+@app.route('/clinic/start', methods=['POST'])
+def clinic_start():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can mark clinic time.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    staff = {u['id']: u for u in _clinic_staff(db)}
+    uid = request.form.get('user_id', type=int)
+    if uid not in staff:
+        flash("That person isn't on an office rate.", 'warning')
+    elif _open_clinic_session(db, uid):
+        flash(f"{staff[uid]['display_name']} is already marked in clinic.", 'warning')
+    else:
+        db.execute(
+            'INSERT INTO clinic_sessions (user_id, start_at, started_by_id) VALUES (?, ?, ?)',
+            (uid, datetime.now(timezone.utc).isoformat(), session['user_id']),
+        )
+        db.commit()
+        flash(f"{staff[uid]['display_name']} is now in clinic. Callback time during clinic won't be paid separately.", 'success')
+    return redirect(request.referrer or url_for('queue'))
+
+
+@app.route('/clinic/stop', methods=['POST'])
+def clinic_stop():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can mark clinic time.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    s = db.execute('SELECT * FROM clinic_sessions WHERE id = ? AND end_at IS NULL',
+                   (request.form.get('session_id', type=int),)).fetchone()
+    if not s:
+        flash('That clinic session is not running.', 'warning')
+    else:
+        mins = _close_clinic_session(db, s, datetime.now(timezone.utc), session['user_id'])
+        db.commit()
+        name = db.execute('SELECT display_name FROM users WHERE id = ?', (s['user_id'],)).fetchone()['display_name']
+        flash(f'{name} clinic time ended: {int(mins // 60)}h {int(mins % 60):02d}m booked at the office rate.', 'success')
+    return redirect(request.referrer or url_for('queue'))
+
+
+@app.route('/clinic-sessions', methods=['GET', 'POST'])
+def clinic_sessions_page():
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can manage clinic time.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    staff = {u['id']: u for u in _clinic_staff(db)}
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'delete':
+            s = db.execute('SELECT * FROM clinic_sessions WHERE id = ?',
+                           (request.form.get('session_id', type=int),)).fetchone()
+            pay = (db.execute('SELECT * FROM payments WHERE id = ?', (s['payment_id'],)).fetchone()
+                   if s and s['payment_id'] else None)
+            if not s:
+                flash('Session not found.', 'warning')
+            elif pay and pay['payroll_run_id']:
+                flash('That session is already on a filed pay slip, so it cannot be removed.', 'warning')
+            else:
+                if pay:
+                    db.execute('DELETE FROM payments WHERE id = ?', (pay['id'],))
+                db.execute('DELETE FROM clinic_sessions WHERE id = ?', (s['id'],))
+                db.commit()
+                flash('Clinic session removed.', 'success')
+        elif action == 'add':
+            try:
+                uid = int(request.form.get('user_id', ''))
+                day = datetime.strptime(request.form.get('day', ''), '%Y-%m-%d').date()
+                t_start = datetime.strptime(request.form.get('start', ''), '%H:%M').time()
+                t_end = datetime.strptime(request.form.get('end', ''), '%H:%M').time()
+            except ValueError:
+                flash('Choose a person, a date, and start and end times.', 'warning')
+                return redirect(url_for('clinic_sessions_page'))
+            start = datetime.combine(day, t_start, tzinfo=SYDNEY_TZ).astimezone(timezone.utc)
+            end = datetime.combine(day, t_end, tzinfo=SYDNEY_TZ).astimezone(timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            overlaps = any(
+                _parse_iso(r['start_at']) < end and (_parse_iso(r['end_at']) if r['end_at'] else now_utc) > start
+                for r in db.execute('SELECT start_at, end_at FROM clinic_sessions WHERE user_id = ?', (uid,)).fetchall()
+            ) if uid in staff else False
+            if uid not in staff:
+                flash("That person isn't on an office rate.", 'warning')
+            elif end <= start:
+                flash('The end time must be after the start time.', 'warning')
+            elif end > now_utc:
+                flash('That session ends in the future - use the Start/Stop switch for live clinic time.', 'warning')
+            elif (end - start) > timedelta(hours=16):
+                flash('A single session can be at most 16 hours.', 'warning')
+            elif overlaps:
+                flash('That overlaps another clinic session for the same person.', 'warning')
+            else:
+                cur = db.execute(
+                    'INSERT INTO clinic_sessions (user_id, start_at, started_by_id) VALUES (?, ?, ?)',
+                    (uid, start.isoformat(), session['user_id']),
+                )
+                s = db.execute('SELECT * FROM clinic_sessions WHERE id = ?', (cur.lastrowid,)).fetchone()
+                mins = _close_clinic_session(db, s, end, session['user_id'])
+                db.commit()
+                flash(f"Added {staff[uid]['display_name']}: {int(mins // 60)}h {int(mins % 60):02d}m at the office rate.", 'success')
+        return redirect(url_for('clinic_sessions_page'))
+
+    rows = []
+    for r in db.execute(
+        "SELECT cs.*, u.display_name, p.amount, p.payroll_run_id FROM clinic_sessions cs "
+        "JOIN users u ON u.id = cs.user_id LEFT JOIN payments p ON p.id = cs.payment_id "
+        "ORDER BY cs.start_at DESC LIMIT 60"
+    ).fetchall():
+        start = _parse_iso(r['start_at']).astimezone(SYDNEY_TZ)
+        end = _parse_iso(r['end_at']).astimezone(SYDNEY_TZ) if r['end_at'] else None
+        mins = ((end or datetime.now(SYDNEY_TZ)) - start).total_seconds() / 60.0
+        rows.append({
+            'id': r['id'], 'name': r['display_name'], 'day': start.strftime('%a %d %b %Y'),
+            'start': start.strftime('%I:%M %p').lstrip('0').lower(),
+            'end': end.strftime('%I:%M %p').lstrip('0').lower() if end else None,
+            'duration': f'{int(mins // 60)}h {int(mins % 60):02d}m',
+            'amount': r['amount'], 'paid': bool(r['payroll_run_id']),
+        })
+    return render_template('clinic_sessions.html', rows=rows, staff=list(staff.values()),
+                           today=datetime.now(SYDNEY_TZ).date().isoformat())
 
 
 # ---------- admin ----------
