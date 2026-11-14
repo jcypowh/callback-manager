@@ -1022,7 +1022,7 @@ def _stats_rows(db):
     so the same person isn't counted twice. Deleted documents are ignored."""
     tasks = db.execute(
         "SELECT id, created_at, intake_source, intake_kind, source_label FROM tasks "
-        "WHERE gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%'"
+        "WHERE status != 'deleted' AND (gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%')"
     ).fetchall()
     rows, counted_new = [], set()
     for t in tasks:
@@ -1728,6 +1728,26 @@ def quick_archive_task(task_id):
     db.commit()
     flash('Task archived.', 'success')
     return redirect(url_for('queue'))
+
+
+@app.route('/task/<int:task_id>/delete', methods=['POST'])
+def delete_task(task_id):
+    """Dr Tu/Sally can remove a task straight from the queue without claiming
+    it first. It is a soft delete (status 'deleted'): the row stays so the
+    mailbox pollers never re-import it, but it disappears from every list and
+    from the stats. Time already paid on it is left alone."""
+    if session.get('role') not in FULL_ACCESS_ROLES:
+        flash('Only Dr Tu or Sally can delete tasks.', 'warning')
+        return redirect(url_for('queue'))
+    db = get_db()
+    task = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task or task['status'] in ('done', 'deleted'):
+        flash('That task is already gone or resolved.', 'warning')
+        return redirect(request.referrer or url_for('queue'))
+    db.execute("UPDATE tasks SET status = 'deleted', pending_question_for = NULL WHERE id = ?", (task_id,))
+    db.commit()
+    flash('Task deleted.', 'success')
+    return redirect(request.referrer or url_for('queue'))
 
 
 @app.route('/tasks/bulk-resolve', methods=['POST'])
@@ -3364,6 +3384,8 @@ def fax_archive_page():
             f'LEFT JOIN users u ON u.id = t.claimed_by_id WHERE t.id IN ({placeholders})',
             linked_task_ids,
         ).fetchall():
+            if row['status'] == 'deleted':
+                continue
             task_info[row['id']] = {'status': row['status'], 'claimed_by_name': row['claimed_by_name']}
     assign_targets = db.execute(
         "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"

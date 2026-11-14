@@ -173,6 +173,10 @@
         <form method="post" action="{{ url_for('claim_task', task_id=t.id) }}">
           <button class="btn btn-sm btn-primary">Claim for myself</button>
         </form>
+        <form method="post" action="{{ url_for('delete_task', task_id=t.id) }}"
+              onsubmit="return confirm('Delete this task? It will be removed from the queue and can't be brought back.');">
+          <button class="btn btn-sm btn-outline-danger" title="Remove this task without claiming it"><i class="fa-solid fa-trash"></i> Delete</button>
+        </form>
         {% if handoff_targets %}
         <form method="post" action="{{ url_for('handoff_task', task_id=t.id) }}" class="action-group action-handover">
           <label class="action-label">Handover to</label>
@@ -235,6 +239,12 @@
           <button type="submit" class="btn btn-outline-success"
                   title="Skip the outcome-note form and archive straight away">
             <i class="fa-solid fa-box-archive"></i> Quick archive
+          </button>
+        </form>
+        <form method="post" action="{{ url_for('delete_task', task_id=t.id) }}"
+              onsubmit="return confirm('Delete this task? It will be removed from the queue and can't be brought back.');">
+          <button type="submit" class="btn btn-outline-danger" title="Remove this task entirely">
+            <i class="fa-solid fa-trash"></i> Delete
           </button>
         </form>
         {% endif %}
