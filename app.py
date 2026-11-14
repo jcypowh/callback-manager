@@ -154,6 +154,7 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 OUTCOME_LABELS = {
     'completed': 'Completed',
+    'deleted': 'Deleted',
     'message_for_doctor': 'Forward to Dr Tu',  # legacy label, for archived tasks from before this changed
 }
 
@@ -438,6 +439,15 @@ def _migrate(db):
             "INSERT INTO config (key, value) VALUES ('phone_rate_consolidated_v1', '1') "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
+
+    # Deleted tasks used to vanish (status 'deleted'); they now live in the
+    # Archive like everything else that has come through, marked Deleted.
+    db.execute(
+        "UPDATE tasks SET status = 'done', outcome_type = 'deleted', "
+        "outcome_note = COALESCE(outcome_note, 'Deleted from the queue.'), "
+        "actioned_at = COALESCE(actioned_at, ?) WHERE status = 'deleted'",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
     db.commit()
 
 
@@ -1022,7 +1032,7 @@ def _stats_rows(db):
     so the same person isn't counted twice. Deleted documents are ignored."""
     tasks = db.execute(
         "SELECT id, created_at, intake_source, intake_kind, source_label FROM tasks "
-        "WHERE status != 'deleted' AND (gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%')"
+        "WHERE COALESCE(outcome_type, '') != 'deleted' AND (gmail_message_id IS NULL OR gmail_message_id NOT LIKE '<training-%')"
     ).fetchall()
     rows, counted_new = [], set()
     for t in tasks:
@@ -1732,21 +1742,27 @@ def quick_archive_task(task_id):
 
 @app.route('/task/<int:task_id>/delete', methods=['POST'])
 def delete_task(task_id):
-    """Dr Tu/Sally can remove a task straight from the queue without claiming
-    it first. It is a soft delete (status 'deleted'): the row stays so the
-    mailbox pollers never re-import it, but it disappears from every list and
-    from the stats. Time already paid on it is left alone."""
+    """Dr Tu/Sally can clear a task straight from the queue without claiming
+    it first. It is filed in the Archive with outcome 'Deleted' (so every
+    message that ever came through is still on record, and the mailbox
+    pollers never re-import it), and left out of the stats. Time already paid
+    on it is left alone."""
     if session.get('role') not in FULL_ACCESS_ROLES:
         flash('Only Dr Tu or Sally can delete tasks.', 'warning')
         return redirect(url_for('queue'))
     db = get_db()
     task = db.execute('SELECT status FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    if not task or task['status'] in ('done', 'deleted'):
-        flash('That task is already gone or resolved.', 'warning')
+    if not task or task['status'] == 'done':
+        flash('That task is already resolved.', 'warning')
         return redirect(request.referrer or url_for('queue'))
-    db.execute("UPDATE tasks SET status = 'deleted', pending_question_for = NULL WHERE id = ?", (task_id,))
+    user = current_user()
+    db.execute(
+        "UPDATE tasks SET status = 'done', outcome_type = 'deleted', outcome_note = ?, "
+        "actioned_by_id = ?, actioned_at = ?, pending_question_for = NULL WHERE id = ?",
+        ('Deleted from the queue.', user['id'], datetime.now(timezone.utc).isoformat(), task_id),
+    )
     db.commit()
-    flash('Task deleted.', 'success')
+    flash('Task deleted - it is kept in the Archive.', 'success')
     return redirect(request.referrer or url_for('queue'))
 
 
@@ -3384,8 +3400,6 @@ def fax_archive_page():
             f'LEFT JOIN users u ON u.id = t.claimed_by_id WHERE t.id IN ({placeholders})',
             linked_task_ids,
         ).fetchall():
-            if row['status'] == 'deleted':
-                continue
             task_info[row['id']] = {'status': row['status'], 'claimed_by_name': row['claimed_by_name']}
     assign_targets = db.execute(
         "SELECT id, display_name FROM users WHERE active = 1 ORDER BY display_name"

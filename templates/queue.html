@@ -174,7 +174,7 @@
           <button class="btn btn-sm btn-primary">Claim for myself</button>
         </form>
         <form method="post" action="{{ url_for('delete_task', task_id=t.id) }}"
-              onsubmit="return confirm('Delete this task? It will be removed from the queue and can't be brought back.');">
+              onsubmit="return confirm('Delete this task? It moves to the Archive marked Deleted.');">
           <button class="btn btn-sm btn-outline-danger" title="Remove this task without claiming it"><i class="fa-solid fa-trash"></i> Delete</button>
         </form>
         {% if handoff_targets %}
@@ -242,7 +242,7 @@
           </button>
         </form>
         <form method="post" action="{{ url_for('delete_task', task_id=t.id) }}"
-              onsubmit="return confirm('Delete this task? It will be removed from the queue and can't be brought back.');">
+              onsubmit="return confirm('Delete this task? It moves to the Archive marked Deleted.');">
           <button type="submit" class="btn btn-outline-danger" title="Remove this task entirely">
             <i class="fa-solid fa-trash"></i> Delete
           </button>

@@ -32,7 +32,7 @@
       <td>{{ t.source_label or '—' }}</td>
       <td>{{ t.patient_name or '(unparsed)' }}</td>
       <td>{{ t.phone_number or '—' }}</td>
-      <td><span class="badge bg-success">{{ outcome_labels.get(t.outcome_type, t.outcome_type) }}</span></td>
+      <td><span class="badge {{ 'bg-secondary' if t.outcome_type == 'deleted' else 'bg-success' }}">{{ outcome_labels.get(t.outcome_type, t.outcome_type) }}</span></td>
       <td style="max-width:280px; white-space:pre-wrap;">{{ t.outcome_note }}</td>
       <td>{{ t.actioned_by_name }}</td>
       <td class="text-nowrap">
