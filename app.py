@@ -1177,18 +1177,6 @@ def handoff_task(task_id):
         flash('You can only hand off to Dr Tu or Sally.', 'warning')
         return redirect(back)
 
-    # Anti-ping-pong: a delegate must have logged at least one real attempt on
-    # this task before handing it off - stops "claim, bounce, claim, bounce"
-    # churning out paid minutes for zero actual effort.
-    if user['role'] == 'delegate':
-        logged = db.execute(
-            'SELECT COUNT(*) AS n FROM task_notes WHERE task_id = ? AND author_id = ?',
-            (task_id, user['id']),
-        ).fetchone()['n']
-        if not logged:
-            flash('Log at least one attempt first (what you tried) before handing this off.', 'warning')
-            return redirect(back)
-
     minutes_val, error = _parse_minutes(user, request.form.get('minutes'))
     if error:
         flash(error, 'warning')
